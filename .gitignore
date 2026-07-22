@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# plexus runtime state — repo-local, regenerated, not source
+.plexus/
+runs/
+
+# stack integration artifacts copied into working repos
+.arteries/
+.marrow/
+.claude/settings.local.json

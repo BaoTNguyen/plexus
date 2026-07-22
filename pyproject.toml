@@ -1,0 +1,15 @@
+[project]
+name = "plexus"
+version = "0.1.0"
+description = "Goal decomposition + acceptance loop on top of heart/arteries/capillaries"
+requires-python = ">=3.10"
+
+[project.scripts]
+plexus = "plexus.cli:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
