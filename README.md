@@ -22,6 +22,33 @@ capillaries  prompt/skill retrieval
 marrow       RL training on heart's episodes
 ```
 
+## What sets it apart
+
+Most autonomous-agent demos are a while-loop around a chat model that runs until
+it declares victory. Plexus is built for the case where you actually leave it
+running:
+
+- **The ledger is the system of record, not the chat log.** State lives in a
+  fsynced JSONL file that survives a crash; `plexus run` resumes at the next open
+  feature instead of restarting the goal. The event spine is telemetry only, so a
+  dropped event never re-runs a landed feature or skips one.
+- **"Done" is defined before the run, not decided by the model.** You declare
+  ground truth (tests, I/O examples, or prose the planner compiles into checks),
+  and a feature lands only when its acceptance criterion passes and nothing in the
+  existing suite regressed. The model never grades its own homework.
+- **It tells you what kind of stuck.** `plexus why` attributes every failure to a
+  phase — coding, testing, or intent — so a bad plan reads differently from a bad
+  diff. Escalations arrive as decisions with options, not stack traces.
+- **A human gate where errors are cheapest.** The plan requires sign-off before
+  anything runs, and unverifiable or contradictory ground truth blocks that gate
+  rather than getting silently guessed past.
+- **It runs while you sleep.** A `notify_cmd` fires on escalation or completion,
+  so unattended operation doesn't mean polling a terminal.
+- **Every goal makes the stack smarter.** Retries become same-task pass/fail
+  pairs, acceptance failures become hard negatives heart can't see alone, and
+  plan outcomes become a trainable signal — all keyed by task_id for marrow, as a
+  byproduct of running.
+
 ## plexus vs heart — the boundary
 
 Both orchestrate agents, so the line must be sharp or the repos bleed into
