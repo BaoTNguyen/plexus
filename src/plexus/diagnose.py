@@ -49,6 +49,7 @@ _PHASE: dict[str, str] = {
 _ESC_PHASE: dict[str, str | None] = {
     "unverifiable_ground_truth": "intent",
     "blocked_on_decision": "intent",  # the agent confirmed the goal is ambiguous
+    "scope_violation": "intent",  # plan and diff disagree on the feature's width
     "regression": "testing",
     "destructive_action": "coding",
     "attempts_exhausted": None,
