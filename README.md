@@ -89,9 +89,14 @@ serial run → activity log), serial dispatch gated on the previous child
 landing, resume-from-next-open-child, and the sign-off gate that arms
 execution. Adapted: warren's prompt libraries and agent memory become
 capillaries and arteries; its run sandbox becomes heart's worktrees. Rejected:
-the container/bwrap sandbox, HTTP control plane, and web UI — this is a
-single-user local stack and heart already owns isolation; a CLI and a ledger
-file cover it.
+the container/bwrap sandbox and bearer-authed HTTP control plane — this is a
+single-user local stack and heart already owns isolation. A web UI was rejected
+for the autonomous loop itself and then deliberately added back for the
+*supervision* surface (`plexus serve`): a stdlib-http, no-build dashboard over
+the ledger for deciding which goal to advance, answering blocks, and stopping a
+run — the decisions a CLI genuinely does not cover. State still lives in
+`.plexus/*.jsonl`; the dashboard is a lens plus three write paths (approve,
+resolve, run/stop) that call the same code the CLI does.
 
 ## What plexus owns vs. delegates
 
@@ -358,7 +363,8 @@ src/plexus/ledger.py    system of record: fsynced JSONL, ledger-first write orde
 src/plexus/observe.py   status (symptom check), insights (ledger), stack (spool rollup)
 src/plexus/diagnose.py  why (per-feature intent/logs/traces/bugs), phase attribution
 src/plexus/review.py    risk class from the plan, plan-vs-landed conformance report
-src/plexus/cli.py       plexus init | plan | approve | run | review | status | insights | why | stack | tail
+src/plexus/serve.py     control plane: local dashboard over the ledger (approve, resolve, run/stop)
+src/plexus/cli.py       plexus init | plan | approve | run | review | status | insights | why | stack | tail | serve
 tests/test_plexus.py    self-check: python3 tests/test_plexus.py (stdlib, no network)
 tests/test_review.py    self-check for the scope gate and the conformance report
 ```
