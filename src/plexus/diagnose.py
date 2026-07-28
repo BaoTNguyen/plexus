@@ -38,6 +38,7 @@ _PHASE: dict[str, str] = {
     "path_violation": "coding",
     "episode_error": "coding",
     "timeout": "coding",
+    "guardrail_violation": "coding",
     "review_rejected": "coding",
     "verify_failed": "testing",
     "acceptance_failed": "testing",

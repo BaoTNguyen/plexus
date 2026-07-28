@@ -148,6 +148,16 @@ def insights(root: str = ".") -> list[str]:
                      f"p95={_pct(lead, .95):.0f}s n={len(lead)}")
     if failed_first:
         lines.append(f"retry rescue: first-attempt-failed={len(failed_first)} rescued={rescued}")
+    # durable per-goal spend: run.py stamps each landed/failed attempt with the
+    # cost of every candidate it ran. Summed here so a multi-week goal's bill
+    # survives the spool's day-scale retention (the spool's live total is `stack`).
+    costed = [r for r in recs if r.get("cost_usd") is not None]
+    if costed:
+        cost = sum(r["cost_usd"] for r in costed)
+        tin = sum(r.get("tokens_in") or 0 for r in costed)
+        tout = sum(r.get("tokens_out") or 0 for r in costed)
+        lines.append(f"cost: ${cost:.4f}  tokens: {tin:,} in / {tout:,} out  "
+                     f"over {len(costed)} attempt(s)")
     from .diagnose import phase_counts  # where defects land across plan/code/test
     phases = phase_counts(recs)
     if phases:
@@ -175,4 +185,16 @@ def stack(hours: float = 24) -> list[str]:
                    if (e.get("payload") or {}).get("store") in ("jsonl", "lost"))
     if degraded:
         lines.append(f"  DEGRADED: {degraded} ledger write(s) fell back from Postgres")
+    # factory-wide spend: sum cost off role.finished only — the atomic
+    # per-invocation event. Summing episode.finished as well would
+    # double-count: its cost is the sum of its roles.
+    priced = [(e.get("payload") or {}) for e in events
+              if e.get("kind") == "role.finished"]
+    priced = [p for p in priced if p.get("cost_usd") is not None]
+    if priced:
+        cost = sum(p["cost_usd"] for p in priced)
+        tin = sum(p.get("tokens_in") or 0 for p in priced)
+        tout = sum(p.get("tokens_out") or 0 for p in priced)
+        lines.append(f"  cost: ${cost:.4f}  tokens: {tin:,} in / {tout:,} out  "
+                     f"({len(priced)} priced role-turn(s))")
     return lines

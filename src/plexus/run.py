@@ -24,7 +24,7 @@ from pathlib import Path
 
 from heart.detect import detect_verifiers
 from heart.env import Workspace
-from heart.episode import best_episode, run_candidates, run_swarm
+from heart.episode import DEFAULT_ROLES, best_episode, run_candidates
 from heart.taskspec import TaskSpec
 
 from . import events, ledger
@@ -38,6 +38,10 @@ _MECHANICAL = {
     "apply_failed": "apply_failed",
     "episode_error": "episode_error",
     "timeout": "timeout",
+    # a secret in the diff — heart zeroes reward and skips verify, same as a path
+    # violation. Kept as its own class so `plexus why` names it instead of hiding
+    # a leaked credential behind a generic episode_error.
+    "guardrail_violation": "guardrail_violation",
 }
 
 # The agent's channel to ask for a decision instead of guessing. A line
@@ -76,7 +80,26 @@ def _lock_goal(root: Path) -> None:
         f.close()
         raise SystemExit(f"another `plexus run` is already active in {root} "
                          f"(lock: {path}) — one run per goal repo")
+    # stamp our pid so the control plane can stop this run regardless of who
+    # started it; the flock (not the content) is still what enforces one-per-repo
+    f.write(str(os.getpid()))
+    f.flush()
     _LOCKS[key] = f
+
+
+def _episode_cost(episodes: list[dict]) -> dict:
+    """Sum usage across every candidate actually run this attempt — best-of-N
+    pays for the losing candidates too, so cost must count them, not just the
+    winner. A key is omitted when heart couldn't price the agent (usage None),
+    so a missing field means 'unknown', never 'zero'. Feeds the durable ledger;
+    the live factory-wide total lives on the spool (`plexus stack`)."""
+    out: dict = {}
+    for k in ("cost_usd", "tokens_in", "tokens_out"):
+        vals = [e["usage"][k] for e in episodes
+                if (e.get("usage") or {}).get(k) is not None]
+        if vals:
+            out[k] = round(sum(vals), 6) if k == "cost_usd" else sum(vals)
+    return out
 
 
 def _git(repo: str | Path, *args: str) -> str:
@@ -213,18 +236,68 @@ def _feature_prompt(spec, feat: dict, retry_context: str) -> str:
     return "\n\n".join(parts)
 
 
+def _probe_regression_signal(repo: str, base: str, timeout: int, goal_id: str) -> None:
+    """Run the repo's own auto-detected suite twice at HEAD before the loop. The
+    regression axis of plexus's coding-vs-intent split *is* heart's pass/fail on
+    this suite, so if it's flaky the split can't be trusted. Warn (once per repo,
+    via a marker), never block — plenty of real repos have some flake, and the
+    operator should decide, not plexus. Best-effort: any error here is silent, the
+    run proceeds. Also flags a suite that already fully passes at base (nothing to
+    regress → the regression axis is vacuous, not wrong)."""
+    marker = Path(repo) / ".plexus" / "verifiers-probed"
+    if marker.exists():
+        return
+    try:
+        verifiers = detect_verifiers(repo)
+        if not verifiers:
+            marker.write_text("no verifiers\n")
+            return
+        from heart.verify import run_verifiers
+        runs = []
+        for _ in range(2):
+            ws = Workspace(repo, base)
+            try:
+                runs.append({n: r["passed"]
+                             for n, r in run_verifiers(verifiers, str(ws.path), timeout).items()})
+            finally:
+                ws.destroy()
+        marker.write_text("probed\n")
+        if runs[0] != runs[1]:
+            flaky = sorted(k for k in runs[0] if runs[0].get(k) != runs[1].get(k))
+            ledger.record("verifiers.flaky", goal_id=goal_id, root=repo,
+                          verifiers=flaky,
+                          reason="repo suite gave different results on two identical "
+                                 "runs at HEAD — the regression signal is noise, so "
+                                 "coding-vs-intent verdicts may be wrong")
+        elif all(runs[0].values()):
+            ledger.record("verifiers.pass_at_base", goal_id=goal_id, root=repo,
+                          reason="repo suite fully passes at HEAD — nothing to regress, "
+                                 "so the regression axis is vacuous (landing rides on "
+                                 "acceptance alone)")
+    except Exception:
+        pass
+
+
 def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
         candidates: int = 1) -> int:
     """Walk the plan. Returns 0 (progressed or done) or 1 (escalated, paused)."""
     root = Path(root)
     _lock_goal(root)
     repo = str(root)
+    # reclaim any worktrees a previously killed run leaked (safe now: the lock we
+    # just took means no live episode for this repo exists)
+    try:
+        from heart.env import prune_repo_worktrees
+        prune_repo_worktrees(repo)
+    except Exception:
+        pass
     plan = load_plan(root)
     recs = ledger.read(root)
 
     if not any(r["kind"] == "goal.started" for r in recs):
         ledger.record("goal.started", goal_id=spec.goal_id, root=root,
                       repo=repo, base_commit=_head(repo), spec_hash=spec.spec_hash)
+    _probe_regression_signal(repo, _head(repo), spec.timeout, spec.goal_id)
 
     for feat in plan:
         fid = feat["id"]
@@ -251,14 +324,10 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
         attempt = next_attempt
         budget = spec.attempts_per_feature - budget_used
         for i in range(budget):
-            # the last budgeted attempt goes swarm when configured: heterogeneous
-            # best-of-N + judge is escalation-grade spend, bought exactly once,
-            # right before a human would be paged (STACK_READINESS §4.4)
-            swarm_now = bool(spec.swarm) and i == budget - 1
             task_id = events.make_task_id(spec.goal_id, fid, attempt)
             ledger.record("feature.started", goal_id=spec.goal_id, feature_id=fid,
                           root=root, attempt=attempt, task_id=task_id,
-                          retry_context=retry_context, swarm=swarm_now)
+                          retry_context=retry_context)
             base = _head(repo)
             task = TaskSpec(
                 task_id=task_id, repo_path=repo, base_commit=base,
@@ -280,14 +349,15 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
                 # long, so capillaries' gate skips it on its own (out of the
                 # complexity band). No plexus-side declaration needed — the gate
                 # separates planner from feature on their inherent characteristics.
-                if swarm_now:
-                    ep = run_swarm(
-                        task, [a.strip() for a in spec.swarm.split(",")],
-                        agent_cmd=spec.agent_cmd, runs_dir=str(root / runs_dir))
-                else:
-                    ep = best_episode(run_candidates(
-                        task, candidates, agent=spec.agent, agent_cmd=spec.agent_cmd,
-                        runs_dir=str(root / runs_dir)))
+                # pipeline: build with heart's implement/test/review roles so a
+                # reviewer REJECT blocks the land (run.py already reads
+                # review_verdict below). Solo turn otherwise.
+                roles = DEFAULT_ROLES if spec.pipeline else None
+                cands = run_candidates(
+                    task, candidates, agent=spec.agent, agent_cmd=spec.agent_cmd,
+                    runs_dir=str(root / runs_dir), roles=roles)
+                ep = best_episode(cands)
+                attempt_cost = _episode_cost(cands)  # best-of-N pays for all N
             finally:
                 os.environ.pop("PLEXUS_GOAL_ID", None)
                 os.environ.pop("PLEXUS_FEATURE_ID", None)
@@ -325,7 +395,7 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
                               episode_id=ep_id,
                               failure_class=_MECHANICAL.get(ep_outcome, "episode_error"),
                               episode_outcome=ep_outcome, acceptance_passed=None,
-                              reason=f"outcome={ep_outcome}")
+                              reason=f"outcome={ep_outcome}", **attempt_cost)
                 retry_context = _verifier_tail(ep)
                 attempt += 1
                 continue
@@ -345,7 +415,7 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
                 commit = _land(repo, diff, fid)
                 ledger.record("feature.landed", goal_id=spec.goal_id, feature_id=fid,
                               root=root, attempt=attempt, task_id=task_id,
-                              episode_id=ep_id, commit=commit)
+                              episode_id=ep_id, commit=commit, **attempt_cost)
                 landed = True
                 break
 
@@ -362,7 +432,8 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
                           episode_id=ep_id, failure_class=fclass,
                           episode_outcome=ep_outcome, acceptance_passed=acc_passed,
                           reason=f"acceptance={'pass' if acc_passed else 'fail'} "
-                                 f"regression={'FAIL' if ep_outcome == 'fail' else 'ok'}")
+                                 f"regression={'FAIL' if ep_outcome == 'fail' else 'ok'}",
+                          **attempt_cost)
             retry_context = acc_tail if not acc_passed else _verifier_tail(ep)
             attempt += 1
 
