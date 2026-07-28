@@ -26,6 +26,13 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--root", default=".")
     s.add_argument("--candidates", type=int, default=1, help="best-of-N per attempt")
 
+    s = sub.add_parser("amend", help="fix a not-yet-landed feature's criterion/spec in the plan")
+    s.add_argument("feature", help="feature id to amend")
+    s.add_argument("--root", default=".")
+    s.add_argument("--acceptance", default=None, help="new acceptance command")
+    s.add_argument("--spec", default=None, dest="spec_text", help="new feature spec")
+    s.add_argument("--title", default=None, help="new title")
+
     s = sub.add_parser("status", help="symptom check; exit 0 ok, 1 escalations, 2 stalled")
     s.add_argument("--root", default=".")
     s.add_argument("--stale-minutes", type=float, default=30)
@@ -51,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--root", default=".")
     s.add_argument("--days", type=float, default=14)
     s.add_argument("--apply", action="store_true", help="actually delete (default: dry run)")
+    s.add_argument("--force", action="store_true",
+                   help="delete even episodes not yet exported to labels.jsonl")
 
     s = sub.add_parser("stack", help="factory-wide event rollup by source")
     s.add_argument("--hours", type=float, default=24)
@@ -59,6 +68,10 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("-n", type=int, default=20)
     s.add_argument("--source", default=None)
     s.add_argument("--no-follow", action="store_true")
+
+    s = sub.add_parser("serve", help="local control-plane dashboard (plan/run/activity/escalations)")
+    s.add_argument("--root", default=".", help="a goal repo, or a parent of several")
+    s.add_argument("--port", type=int, default=8100)
 
     args = p.parse_args(argv)
     if args.cmd == "init":
@@ -84,6 +97,12 @@ def main(argv: list[str] | None = None) -> int:
         from .run import run
         from .spec import load_spec
         return run(load_spec(args.root), args.root, candidates=args.candidates)
+    if args.cmd == "amend":
+        from .plan import amend
+        from .spec import load_spec
+        print(amend(load_spec(args.root), args.feature, args.root,
+                    acceptance=args.acceptance, spec_text=args.spec_text, title=args.title))
+        return 0
     if args.cmd == "status":
         from . import observe
         lines, code = observe.status(args.root, stale_minutes=args.stale_minutes)
@@ -114,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "prune":
         from .prune import prune
-        print("\n".join(prune(args.root, days=args.days, apply=args.apply)))
+        print("\n".join(prune(args.root, days=args.days, apply=args.apply, force=args.force)))
         return 0
     if args.cmd == "stack":
         from . import observe
@@ -124,6 +143,9 @@ def main(argv: list[str] | None = None) -> int:
         from heart.pulse import tail
         tail(n=args.n, source=args.source, follow=not args.no_follow)
         return 0
+    if args.cmd == "serve":
+        from .serve import serve
+        return serve(args.root, args.port)
     return 2
 
 
