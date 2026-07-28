@@ -32,6 +32,13 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--acceptance", default=None, help="new acceptance command")
     s.add_argument("--spec", default=None, dest="spec_text", help="new feature spec")
     s.add_argument("--title", default=None, help="new title")
+    s.add_argument("--touches", default=None,
+                   help="new path allowlist, comma-separated globs")
+
+    s = sub.add_parser("review", help="plan-vs-landed conformance: which commits you must read")
+    s.add_argument("--root", default=".")
+    s.add_argument("--plan", action="store_true",
+                   help="classify the plan before it runs, instead of what landed")
 
     s = sub.add_parser("status", help="symptom check; exit 0 ok, 1 escalations, 2 stalled")
     s.add_argument("--root", default=".")
@@ -83,10 +90,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "plan":
         from .plan import make_plan
         from .spec import load_spec
+        from .review import classify
         feats = make_plan(load_spec(args.root), args.root)
         print(f"planned {len(feats)} feature(s); review then `plexus approve`")
         for f in feats:
-            print(f"  {f['id']}: {f['title']}")
+            # the class is the review budget, and this is the last moment it can
+            # be changed for free — narrow a `touches` list here, not after
+            print(f"  [{classify(f)}] {f['id']}: {f['title']}")
         return 0
     if args.cmd == "approve":
         from .plan import approve
@@ -100,8 +110,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "amend":
         from .plan import amend
         from .spec import load_spec
+        touches = ([t.strip() for t in args.touches.split(",") if t.strip()]
+                   if args.touches is not None else None)
         print(amend(load_spec(args.root), args.feature, args.root,
-                    acceptance=args.acceptance, spec_text=args.spec_text, title=args.title))
+                    acceptance=args.acceptance, spec_text=args.spec_text,
+                    title=args.title, touches=touches))
+        return 0
+    if args.cmd == "review":
+        from . import review
+        from .spec import load_spec
+        print(review.preview(args.root) if args.plan
+              else review.report(load_spec(args.root), args.root))
         return 0
     if args.cmd == "status":
         from . import observe
