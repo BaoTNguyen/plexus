@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [dev]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: plexus
+
+      # plexus imports heart as a library from a sibling source checkout — there
+      # is no packaging boundary between them (heart's STACK_READINESS.md 1.2),
+      # so CI has to reproduce that layout or tests/test_heart_api_pin.py cannot
+      # run at all. Which heart is the point of the matrix below: a PR into main
+      # is judged against heart's main, while work on dev is judged against
+      # heart's dev. That is the cross-repo slice order expressed as a gate —
+      # a plexus change that needs an unlanded heart change goes green on dev
+      # and red on the PR, which is exactly when you want to hear about it.
+      - uses: actions/checkout@v4
+        with:
+          repository: BaoTNguyen/heart
+          ref: ${{ github.base_ref == 'main' && 'main' || 'dev' }}
+          path: heart
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install pytest
+
+      - name: suite
+        working-directory: plexus
+        env:
+          PYTHONPATH: ${{ github.workspace }}/heart/src:${{ github.workspace }}/plexus/src
+        run: |
+          python -m pytest -q
+          python tests/test_plexus.py
+          python tests/test_review.py
