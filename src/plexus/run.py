@@ -28,6 +28,7 @@ from heart.episode import DEFAULT_ROLES, best_episode, run_candidates
 from heart.taskspec import TaskSpec
 
 from . import events, ledger
+from .plan import matches as _matches
 from .plan import load_plan
 
 # heart episode outcomes that are mechanical failures — no valid applied diff to
@@ -208,6 +209,17 @@ def _diff_paths(repo: str | Path, diff: str) -> list[str]:
     return [line.split("\t", 2)[2] for line in r.stdout.splitlines() if "\t" in line]
 
 
+def _stray_paths(paths: list[str], touches: list[str] | None) -> list[str]:
+    """Paths the diff touched that the plan never authorised.
+
+    A plan with no `touches` — every plan made before this field existed — is
+    unenforced rather than blocked: retroactively refusing to land a resumed
+    goal would strand it with no way forward but hand-editing the ledger."""
+    if not touches:
+        return []
+    return [p for p in paths if not any(_matches(p, g) for g in touches)]
+
+
 def _land(repo: str | Path, diff: str, feature_id: str) -> str:
     """Commit exactly the paths the diff touched — never `add -A`. The goal repo
     is a real working tree: it holds the user's unrelated edits and plexus's own
@@ -225,6 +237,19 @@ def _feature_prompt(spec, feat: dict, retry_context: str) -> str:
     parts = [feat["spec"]]
     if spec.context:
         parts.append(f"Repo context: {spec.context}")
+    if feat.get("touches"):
+        # tell the agent the allowlist rather than letting it discover the wall
+        # by hitting it — a refused land costs a whole episode
+        parts.append(
+            "Change ONLY these paths: " + ", ".join(feat["touches"])
+            + ". A diff touching anything else is refused and the run stops. "
+              "If the feature genuinely cannot be built inside them, do not "
+              "widen the diff — report it as a blocked decision instead.")
+    if feat.get("contract"):
+        parts.append(
+            "Public surface this feature is planned to add or change: "
+            + "; ".join(feat["contract"])
+            + ". Anything else you export publicly gets flagged for review.")
     if retry_context:
         parts.append("A previous attempt did not satisfy the acceptance check. "
                      f"Its output tail:\n{retry_context}\nFix the cause.")
@@ -412,6 +437,19 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
             # `unverified` counts as "nothing regressed": there was no suite to
             # regress, and refusing to land would deadlock every test-less repo.
             if acc_passed and ep_outcome in ("pass", "unverified") and review != "reject":
+                # Scope gate, last thing before the commit exists. Not a retry:
+                # the agent and the plan disagree about how wide the feature is,
+                # and only a human can say which of the two is wrong.
+                stray = _stray_paths(_diff_paths(repo, diff), feat.get("touches"))
+                if stray:
+                    ledger.record(
+                        "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
+                        root=root, reason_class="scope_violation",
+                        reason="diff touched paths the plan did not authorise: "
+                               + ", ".join(sorted(stray)[:10])
+                               + f" (allowed: {', '.join(feat['touches'])})",
+                        episode_ids=[ep_id])
+                    return 1
                 commit = _land(repo, diff, fid)
                 ledger.record("feature.landed", goal_id=spec.goal_id, feature_id=fid,
                               root=root, attempt=attempt, task_id=task_id,

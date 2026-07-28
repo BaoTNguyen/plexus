@@ -89,9 +89,14 @@ serial run → activity log), serial dispatch gated on the previous child
 landing, resume-from-next-open-child, and the sign-off gate that arms
 execution. Adapted: warren's prompt libraries and agent memory become
 capillaries and arteries; its run sandbox becomes heart's worktrees. Rejected:
-the container/bwrap sandbox, HTTP control plane, and web UI — this is a
-single-user local stack and heart already owns isolation; a CLI and a ledger
-file cover it.
+the container/bwrap sandbox and bearer-authed HTTP control plane — this is a
+single-user local stack and heart already owns isolation. A web UI was rejected
+for the autonomous loop itself and then deliberately added back for the
+*supervision* surface (`plexus serve`): a stdlib-http, no-build dashboard over
+the ledger for deciding which goal to advance, answering blocks, and stopping a
+run — the decisions a CLI genuinely does not cover. State still lives in
+`.plexus/*.jsonl`; the dashboard is a lens plus three write paths (approve,
+resolve, run/stop) that call the same code the CLI does.
 
 ## What plexus owns vs. delegates
 
@@ -184,6 +189,59 @@ Three kinds, each reduced to an executable check before the run phase starts:
   that the single repair attempt doesn't fix.
 - Escalations are questions with options, not stack traces: what failed, what
   was tried, what decision is needed.
+
+## Scope, contract, and what you actually have to read
+
+The plan carries two fields beyond the spec and the criterion, and both exist to
+buy back review time:
+
+- **`touches`** — a closed allowlist of paths the feature may create or modify.
+  It goes into the agent's prompt so it knows the wall is there, and it is
+  checked against the applied diff immediately before the commit. A path outside
+  it raises a `scope_violation` escalation and the feature does not land. This is
+  the only artifact here the agent cannot route around, which is what makes the
+  rest of them worth trusting.
+- **`contract`** — the public symbols the feature adds or changes. Nothing blocks
+  on it; `plexus review` AST-diffs each landed commit against it and flags what
+  was exported but never planned.
+
+From those two, before any episode runs, every feature gets a class:
+
+| class | it is one when | what you read |
+| --- | --- | --- |
+| `spine` | `touches` can reach `ledger.py`, `spec.py`, `export.py`, `events.py` or `LEDGER.md`, or `contract` declares a new ledger kind | every line |
+| `boundary` | `contract` adds a CLI subcommand or a `plexus.toml` key, or `touches` can reach the heart API pin | the contract diff and the integration point |
+| `leaf` | one repo, no new public surface beyond `contract` | the report line, unless it says FLAG |
+| `mechanical` | docs and tests only | nothing |
+
+A class is judged by what the allowlist *permits*, not by what the plan meant:
+`src/plexus/*` reads as `spine` because it could reach the ledger. Narrowing the
+glob is how you buy a cheaper review, and `plexus plan` prints the class next to
+each feature so you can do that at the one moment it is still free.
+
+```console
+$ plexus review --plan          # before the run: what will cost you attention
+$ plexus review                 # after: plan vs landed, per commit
+$ plexus amend f2 --touches 'src/plexus/*,tests/*'   # the plan was wrong, not the diff
+```
+
+`plexus why` files a `scope_violation` under **intent**, not coding — a diff that
+outgrew its slice is a planning failure, and the fix is usually `amend`, not a
+retry.
+
+### Cross-repo slices
+
+There is no cross-repo orchestration and there should not be: a goal runs in one
+repo. A feature that needs a change upstream is split and ordered by hand.
+
+1. Land the upstream change in its own repo, on `dev`.
+2. Bump `tests/test_heart_api_pin.py` to pin the new surface. It fails in
+   plexus's own suite the moment the seam moves, so it is the integration gate.
+3. Only then run the downstream feature.
+
+CI enforces the order rather than trusting it: a PR into `main` is tested against
+heart's `main`, while `dev` is tested against heart's `dev`. A plexus change that
+depends on unlanded heart work goes green on `dev` and red on the PR.
 
 ## Observability
 
@@ -304,8 +362,11 @@ src/plexus/events.py    spine emission via heart.events, task_id convention
 src/plexus/ledger.py    system of record: fsynced JSONL, ledger-first write order
 src/plexus/observe.py   status (symptom check), insights (ledger), stack (spool rollup)
 src/plexus/diagnose.py  why (per-feature intent/logs/traces/bugs), phase attribution
-src/plexus/cli.py       plexus init | plan | approve | run | status | insights | why | stack | tail
+src/plexus/review.py    risk class from the plan, plan-vs-landed conformance report
+src/plexus/serve.py     control plane: local dashboard over the ledger (approve, resolve, run/stop)
+src/plexus/cli.py       plexus init | plan | approve | run | review | status | insights | why | stack | tail | serve
 tests/test_plexus.py    self-check: python3 tests/test_plexus.py (stdlib, no network)
+tests/test_review.py    self-check for the scope gate and the conformance report
 ```
 
 Install mirrors marrow: `pip install -e ../heart && pip install -e .`.

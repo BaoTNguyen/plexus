@@ -379,7 +379,8 @@ assert not (ur / "runs" / "ep-x").exists(), "--force deletes anyway"
 # --- planner parsing: prose around the JSON must not defeat it ---
 from plexus.plan import _parse_features  # noqa: E402
 
-FEAT = ('[{"id": "a", "title": "t", "spec": "s", "acceptance": "pytest -q"}]')
+FEAT = ('[{"id": "a", "title": "t", "spec": "s", "acceptance": "pytest -q",'
+        ' "touches": ["src/*"], "contract": []}]')
 # a fenced block wins over bracket-slicing: the trailing sentence here contains
 # brackets, which is exactly what the outermost-[..] heuristic gets wrong
 assert _parse_features(f"```json\n{FEAT}\n```\n\nSkipped a [scaffold] step.")[0]["id"] == "a"
@@ -395,6 +396,17 @@ try:
     raise AssertionError("should have rejected an incomplete feature")
 except ValueError:
     pass
+# a plan with no path allowlist cannot be scope-enforced, so it never gets made
+NO_TOUCHES = '[{"id": "a", "title": "t", "spec": "s", "acceptance": "pytest -q"}]'
+try:
+    _parse_features(f"```json\n{NO_TOUCHES}\n```")
+    raise AssertionError("should have rejected a feature with no touches")
+except ValueError:
+    pass
+# contract is genuinely optional — absent and "adds no public surface" are the
+# same statement, so it defaults rather than failing the plan
+assert _parse_features(f"```json\n{NO_TOUCHES[:-2]}, \"touches\": [\"src/*\"]}}]"
+                       f"\n```")[0]["contract"] == []
 
 # --- cost: candidate spend sums across all N, skips unpriced, surfaces in insights ---
 from plexus.run import _episode_cost  # noqa: E402

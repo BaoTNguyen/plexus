@@ -5,6 +5,7 @@ warren's gate, kept because the plan is where scope errors are cheapest.
 from __future__ import annotations
 
 import datetime
+import fnmatch
 import json
 import os
 import re
@@ -29,8 +30,39 @@ Definition of done — this must pass when all features are built: {suite}
 Reply with ONLY a JSON array of features, in build order. Each feature:
 {{"id": "<short-slug>", "title": "<one line>",
   "spec": "<what to implement, self-contained>",
-  "acceptance": "<shell command that exits 0 iff this feature works>"}}
+  "acceptance": "<shell command that exits 0 iff this feature works>",
+  "touches": ["<path glob>", ...],
+  "contract": ["<public symbol this feature adds or changes>", ...]}}
+
+`touches` is a closed allowlist of every path the feature may create or modify.
+A diff outside it is refused and the run stops, so keep it tight: a feature that
+needs half the tree is two features.
+`contract` names each public symbol added or changed, as "module.func(sig)",
+"class Name", "<cli> <subcommand>", "<config> key: <k>" or "ledger kind: <kind>".
+Use [] when the feature adds no public surface.
+If the feature changes what a command prints, end `spec` with an `expect:` block
+holding the literal expected output.
 Keep each feature small enough to land in one agent session."""
+
+
+def matches(path: str, glob: str) -> bool:
+    """Does `path` fall inside one `touches` glob?
+
+    Lives here because `touches` is a plan field: run.py enforces it and
+    review.py classifies from it, and neither should own the semantics.
+
+    Plain fnmatch is wrong in both directions — its `*` spans `/`, so `src/*`
+    would authorise a file three levels down, while `tests/**` would not match
+    `tests/a/b.py` at all. Compare segment by segment instead, with `**` as the
+    only wildcard allowed to cross a separator."""
+    if glob == "**":
+        return True
+    pparts, gparts = path.split("/"), glob.split("/")
+    if gparts[-1] == "**":
+        return len(pparts) >= len(gparts) and all(
+            fnmatch.fnmatch(p, g) for p, g in zip(pparts, gparts[:-1]))
+    return len(pparts) == len(gparts) and all(
+        fnmatch.fnmatch(p, g) for p, g in zip(pparts, gparts))
 
 
 def plan_path(root: str | Path = ".") -> Path:
@@ -52,9 +84,17 @@ def _parse_features(raw: str) -> list[dict]:
 
 def _validated(feats: list[dict]) -> list[dict]:
     for f in feats:
-        missing = [k for k in ("id", "title", "spec", "acceptance") if not f.get(k)]
+        missing = [k for k in ("id", "title", "spec", "acceptance", "touches")
+                   if not f.get(k)]
         if missing:
             raise ValueError(f"feature missing {missing}: {f}")
+        if not isinstance(f["touches"], list):
+            raise ValueError(f"touches must be a list of globs: {f['touches']!r}")
+        # `contract` may legitimately be empty, so it cannot be required the way
+        # `touches` is — absent and "adds no public surface" look identical.
+        f.setdefault("contract", [])
+        if not isinstance(f["contract"], list):
+            raise ValueError(f"contract must be a list: {f['contract']!r}")
     return feats
 
 
@@ -145,7 +185,7 @@ def check_criteria(spec, root: str | Path = ".") -> list[tuple[str, str]]:
 
 def amend(spec, feature_id: str, root: str | Path = ".",
           acceptance: str | None = None, spec_text: str | None = None,
-          title: str | None = None) -> str:
+          title: str | None = None, touches: list[str] | None = None) -> str:
     """Fix one not-yet-landed feature's plan in place.
 
     The plan is otherwise immutable once armed, so a criterion discovered wrong
@@ -170,8 +210,13 @@ def amend(spec, feature_id: str, root: str | Path = ".",
         changes["spec"] = spec_text
     if title is not None:
         changes["title"] = title
+    if touches is not None:
+        # the resolution path for a scope_violation escalation where the plan,
+        # not the agent, was wrong about how wide the feature really is
+        changes["touches"] = touches
     if not changes:
-        raise SystemExit("nothing to amend — pass --acceptance / --spec / --title")
+        raise SystemExit(
+            "nothing to amend — pass --acceptance / --spec / --title / --touches")
     feat.update(changes)
 
     with open(plan_path(root), "w", encoding="utf-8") as f:
