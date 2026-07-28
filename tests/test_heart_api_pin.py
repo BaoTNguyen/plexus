@@ -130,6 +130,16 @@ class TestHeartApiPin(unittest.TestCase):
         params = list(inspect.signature(best_episode).parameters)
         self.assertGreaterEqual(len(params), 1)
 
+    def test_pipeline_symbols(self):
+        # run.py: from heart.episode import DEFAULT_ROLES, best_episode, run_candidates
+        # and passes roles=DEFAULT_ROLES into run_candidates.
+        from heart.episode import DEFAULT_ROLES, run_episode
+        self.assertTrue(DEFAULT_ROLES and
+                        all("name" in r and "prompt" in r for r in DEFAULT_ROLES),
+                        "DEFAULT_ROLES lost its {name,prompt} shape plexus relies on")
+        # roles= flows through **kwargs to run_episode, which must still accept it
+        self.assertIn("roles", inspect.signature(run_episode).parameters)
+
     # ---- end-to-end behavioral pin ---------------------------------------
 
     def test_end_to_end_matches_plexus_usage(self):

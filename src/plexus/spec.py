@@ -34,9 +34,8 @@ episodes_per_goal = 25
 name = "claude"   # any heart agent: claude|codex|gemini|opencode|api[:profile]|shell
 timeout = 300
 # cmd = "..."     # custom agent template, prompt in $HEART_PROMPT (overrides name)
-# swarm = "claude,codex"  # heterogeneous best-of-N + judge on a feature's LAST
-#                         # budgeted attempt — escalation-grade spend right
-#                         # before a human would be paged
+# pipeline = true # build each feature with heart's implement/test/review roles
+#                 # instead of one solo turn; a reviewer REJECT blocks the land
 '''
 
 
@@ -52,7 +51,7 @@ class GoalSpec:
     agent_cmd: str | None
     timeout: int
     spec_hash: str
-    swarm: str | None = None  # "a,b,c" -> heart run_swarm on the last attempt
+    pipeline: bool = False  # implement/test/review roles instead of a solo turn
 
 
 def spec_path(root: str | Path = ".") -> Path:
@@ -73,7 +72,7 @@ def load_spec(root: str | Path = ".") -> GoalSpec:
         episodes_per_goal=int(budgets.get("episodes_per_goal", 25)),
         agent=agent.get("name", "claude"),
         agent_cmd=agent.get("cmd"),
-        swarm=agent.get("swarm"),
+        pipeline=bool(agent.get("pipeline", False)),
         timeout=int(agent.get("timeout", 300)),
         spec_hash=hashlib.sha256(raw).hexdigest()[:12],
     )

@@ -364,6 +364,18 @@ assert (xr / "runs" / "ep-b" / "episode.json").exists()   # ...and deleted nothi
 prune(xr, days=0, apply=True)
 assert not (xr / "runs" / "ep-b").exists() and (xr / "runs" / "ep-c").exists()
 
+# prune refuses to delete an episode whose reward was never exported (no
+# labels.jsonl), and --force overrides
+ur = tmp / "unexported-repo"
+(ur / "runs" / "ep-x").mkdir(parents=True)
+(ur / "runs" / "ep-x" / "episode.json").write_text("{}")
+ledger.record("feature.landed", goal_id="g", feature_id="f", root=ur, episode_id="ep-x")
+refused = "\n".join(prune(ur, days=0, apply=True))
+assert "refusing to prune" in refused, refused
+assert (ur / "runs" / "ep-x").exists(), "unexported reward must survive without --force"
+prune(ur, days=0, apply=True, force=True)
+assert not (ur / "runs" / "ep-x").exists(), "--force deletes anyway"
+
 # --- planner parsing: prose around the JSON must not defeat it ---
 from plexus.plan import _parse_features  # noqa: E402
 
@@ -383,5 +395,61 @@ try:
     raise AssertionError("should have rejected an incomplete feature")
 except ValueError:
     pass
+
+# --- cost: candidate spend sums across all N, skips unpriced, surfaces in insights ---
+from plexus.run import _episode_cost  # noqa: E402
+
+# two priced candidates + one heart couldn't price (usage None) → sum the priced
+cands = [{"usage": {"cost_usd": 0.10, "tokens_in": 100, "tokens_out": 50}},
+         {"usage": {"cost_usd": 0.05, "tokens_in": 40, "tokens_out": 20}},
+         {"usage": {"cost_usd": None, "tokens_in": None, "tokens_out": None}}]
+c = _episode_cost(cands)
+assert c == {"cost_usd": 0.15, "tokens_in": 140, "tokens_out": 70}, c
+assert _episode_cost([{"usage": None}]) == {}, "no usage → no cost keys, not zeros"
+
+cr = tmp / "cost-repo"
+ledger.record("feature.landed", goal_id="g", feature_id="f1", root=cr,
+              cost_usd=0.15, tokens_in=140, tokens_out=70)
+ledger.record("feature.failed", goal_id="g", feature_id="f2", root=cr,
+              cost_usd=0.05, tokens_in=40, tokens_out=20)
+ins = "\n".join(observe.insights(str(cr)))
+assert "cost: $0.2000" in ins and "180 in / 90 out" in ins, ins
+
+# --- amend: rewrites an unlanded feature's criterion, refuses a landed one ---
+from types import SimpleNamespace  # noqa: E402
+from plexus.plan import amend, load_plan, plan_path  # noqa: E402
+
+ar = tmp / "amend-repo"
+(ar / ".plexus").mkdir(parents=True)
+plan_path(ar).write_text("\n".join(json.dumps(p) for p in [
+    {"plan_id": "p1", "id": "f1", "title": "one", "spec": "s1", "acceptance": "false"},
+    {"plan_id": "p1", "id": "f2", "title": "two", "spec": "s2", "acceptance": "false"},
+]) + "\n")
+sp = SimpleNamespace(goal_id="g")
+
+amend(sp, "f2", ar, acceptance="pytest tests/f2.py", title="Two!")
+plan = {f["id"]: f for f in load_plan(ar)}
+assert plan["f2"]["acceptance"] == "pytest tests/f2.py", plan["f2"]
+assert plan["f2"]["title"] == "Two!" and plan["f1"]["acceptance"] == "false"
+assert any(r["kind"] == "plan.amended" and r.get("feature_id") == "f2"
+           for r in ledger.read(ar)), "amend must record plan.amended"
+
+# a landed feature is refused
+ledger.record("feature.landed", goal_id="g", feature_id="f1", root=ar, attempt=1)
+try:
+    amend(sp, "f1", ar, acceptance="true")
+    raise AssertionError("amend must refuse a landed feature")
+except SystemExit:
+    pass
+
+# --- control plane: serve.py carries its own demo(); run it here so its proof
+# (ledger->tab state, goal discovery, flock liveness) guards on the normal check ---
+import contextlib
+import io
+
+from plexus import serve  # noqa: E402
+
+with contextlib.redirect_stdout(io.StringIO()):  # demo() prints "ok"; keep our line clean
+    serve.demo()
 
 print("plexus self-check ok")

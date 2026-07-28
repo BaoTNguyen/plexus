@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -68,11 +69,27 @@ def make_plan(spec, root: str | Path = ".") -> list[dict]:
     # and the only turn where retrieval scores well. No override needed: the
     # prompt is short and low-density, so it lands inside capillaries' complexity
     # band and retrieves naturally, while the long feature prompts fall outside it.
-    res = run_agent(spec.agent, prompt, cwd=str(root), extra_env={},
-                    timeout=spec.timeout, log_path=log, agent_cmd=spec.agent_cmd)
-    if res["exit_code"] != 0:
-        raise SystemExit(f"planner agent failed (exit {res['exit_code']}); see {log}")
-    feats = _parse_features(log.read_text(encoding="utf-8", errors="replace"))
+    #
+    # Retry: this is the highest-leverage turn in the whole loop, so one flaky
+    # call or one unparseable reply must not abort planning. A malformed reply is
+    # re-asked (the log is overwritten each try), and only an exhausted budget
+    # raises. Attempts are cheap relative to a wrong or missing plan.
+    attempts = max(1, int(os.getenv("PLEXUS_PLAN_ATTEMPTS", "3")))
+    feats = None
+    last_err = ""
+    for i in range(attempts):
+        res = run_agent(spec.agent, prompt, cwd=str(root), extra_env={},
+                        timeout=spec.timeout, log_path=log, agent_cmd=spec.agent_cmd)
+        if res["exit_code"] != 0:
+            last_err = f"planner agent failed (exit {res['exit_code']})"
+            continue
+        try:
+            feats = _parse_features(log.read_text(encoding="utf-8", errors="replace"))
+            break
+        except (ValueError, json.JSONDecodeError) as exc:
+            last_err = f"planner output unparseable: {exc}"
+    if feats is None:
+        raise SystemExit(f"{last_err} after {attempts} attempt(s); see {log}")
     plan_id = "plan-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     with open(plan_path(root), "w", encoding="utf-8") as f:
         for feat in feats:
@@ -104,23 +121,65 @@ def check_criteria(spec, root: str | Path = ".") -> list[tuple[str, str]]:
     base = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
                           capture_output=True, text=True, check=True).stdout.strip()
     bad: list[tuple[str, str]] = []
-    ws = Workspace(str(root), base)
-    try:
-        for feat in load_plan(root):
-            try:
-                r = subprocess.run(feat["acceptance"], shell=True, cwd=str(ws.path),
-                                   capture_output=True, text=True, timeout=spec.timeout)
-            except subprocess.TimeoutExpired:
-                bad.append((feat["id"], "acceptance command hung on the base commit"))
-                continue
-            if r.returncode == 0:
-                bad.append((feat["id"], "already passes on the base commit — vacuous "
-                                        "criterion, or the feature is already built"))
-            elif r.returncode == 127:
-                bad.append((feat["id"], "command not found — not executable ground truth"))
-    finally:
-        ws.destroy()
+    # A fresh worktree per criterion: run in a shared tree and one criterion's
+    # side effects (files it writes, a port it binds, a DB row it inserts) leak
+    # into the next, which can mask or trip a later check. Each criterion is
+    # judged against a clean base and nothing else.
+    for feat in load_plan(root):
+        ws = Workspace(str(root), base)
+        try:
+            r = subprocess.run(feat["acceptance"], shell=True, cwd=str(ws.path),
+                               capture_output=True, text=True, timeout=spec.timeout)
+        except subprocess.TimeoutExpired:
+            bad.append((feat["id"], "acceptance command hung on the base commit"))
+            continue
+        finally:
+            ws.destroy()
+        if r.returncode == 0:
+            bad.append((feat["id"], "already passes on the base commit — vacuous "
+                                    "criterion, or the feature is already built"))
+        elif r.returncode == 127:
+            bad.append((feat["id"], "command not found — not executable ground truth"))
     return bad
+
+
+def amend(spec, feature_id: str, root: str | Path = ".",
+          acceptance: str | None = None, spec_text: str | None = None,
+          title: str | None = None) -> str:
+    """Fix one not-yet-landed feature's plan in place.
+
+    The plan is otherwise immutable once armed, so a criterion discovered wrong
+    mid-run used to mean hand-editing .plexus/plan.jsonl. This rewrites the one
+    feature's fields and records plan.amended. A landed feature is refused — its
+    commit already shipped, so amending it would be a lie. Re-run `plexus run`
+    after amending; the feature reopens against the new criterion."""
+    from . import ledger
+    plan = load_plan(root)
+    feat = next((f for f in plan if f["id"] == feature_id), None)
+    if feat is None:
+        raise SystemExit(f"no feature {feature_id!r} in the plan")
+    recs = ledger.read(root)
+    if any(r["kind"] == "feature.landed" and r.get("feature_id") == feature_id
+           and r.get("goal_id") == spec.goal_id for r in recs):
+        raise SystemExit(f"{feature_id} already landed — its commit shipped; amend refused")
+
+    changes = {}
+    if acceptance is not None:
+        changes["acceptance"] = acceptance
+    if spec_text is not None:
+        changes["spec"] = spec_text
+    if title is not None:
+        changes["title"] = title
+    if not changes:
+        raise SystemExit("nothing to amend — pass --acceptance / --spec / --title")
+    feat.update(changes)
+
+    with open(plan_path(root), "w", encoding="utf-8") as f:
+        for p in plan:
+            f.write(json.dumps(p) + "\n")
+    ledger.record("plan.amended", goal_id=spec.goal_id, feature_id=feature_id,
+                  root=root, changed=sorted(changes))
+    return f"amended {feature_id}: {', '.join(sorted(changes))} — re-run `plexus run`"
 
 
 def approve(spec, root: str | Path = ".", approver: str = "human",

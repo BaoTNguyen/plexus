@@ -20,10 +20,28 @@ Dry run by default. `--apply` deletes.
 from __future__ import annotations
 
 import datetime
+import json
 import shutil
 from pathlib import Path
 
 from . import ledger
+
+
+def _exported_ids(root: str | Path) -> set[str]:
+    """Episode ids already captured in labels.jsonl — their reward is safe to
+    delete because marrow has it. Missing file = nothing exported yet."""
+    p = Path(root) / ".plexus" / "labels.jsonl"
+    if not p.exists():
+        return set()
+    out: set[str] = set()
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            eid = json.loads(line).get("episode_id")
+        except json.JSONDecodeError:
+            continue
+        if eid:
+            out.add(eid)
+    return out
 
 
 def _referenced(recs: list[dict]) -> set[str]:
@@ -73,7 +91,7 @@ def plan_prune(root: str | Path = ".", days: float = 14,
 
 
 def prune(root: str | Path = ".", days: float = 14, apply: bool = False,
-          runs_dir: str = "runs") -> list[str]:
+          runs_dir: str = "runs", force: bool = False) -> list[str]:
     prunable, kept, freed = plan_prune(root, days, runs_dir)
     mb = freed / 1_000_000
     if not prunable:
@@ -82,10 +100,22 @@ def prune(root: str | Path = ".", days: float = 14, apply: bool = False,
     lines = [f"{'pruned' if apply else 'prunable'}: {len(prunable)} episode dir(s), "
              f"{mb:.1f} MB   kept: {len(kept)}"]
     if apply:
+        # Refuse before deleting, not after: an episode's reward in episode.json
+        # is marrow's training signal, captured only once `plexus export` writes
+        # it to labels.jsonl. Deleting an un-exported episode discards that data
+        # for good, so block it unless the operator forces it.
+        exported = _exported_ids(root)
+        unexported = [d for d in prunable if d.name not in exported]
+        if unexported and not force:
+            return [f"refusing to prune: {len(unexported)} of {len(prunable)} episode(s) "
+                    f"are not in .plexus/labels.jsonl — their reward is training data "
+                    f"that deletion would lose.",
+                    "run `plexus export` first, or `plexus prune --apply --force` to "
+                    "delete anyway."]
         for d in prunable:
             shutil.rmtree(d, ignore_errors=True)
-        lines.append("run `plexus export` before pruning if you have not — "
-                     "reward lives in episode.json, and it is gone now")
+        lines.append(f"deleted {len(prunable)} dir(s)"
+                     + (f" ({len(unexported)} not exported — forced)" if unexported else ""))
     else:
         lines += [f"  {d.name}" for d in prunable[:10]]
         if len(prunable) > 10:
