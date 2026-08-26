@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.venv/
 
 # plexus runtime state — repo-local, regenerated, not source
 .plexus/
@@ -12,3 +13,8 @@ runs/
 .arteries/
 .marrow/
 .claude/settings.local.json
+
+# Frontend toolchain (built assets under src/plexus/static are packaged)
+frontend/node_modules/
+frontend/.vite/
+frontend/*.tsbuildinfo

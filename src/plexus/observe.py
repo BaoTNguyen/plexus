@@ -1,7 +1,7 @@
 """Goal-level read side, per pulse's division of labor: `plexus status` is
 the symptom check (exit code as the alert primitive), `pulse episode <id>` is
-the cause drill-down. Insights come from the ledger, not the spool — pulse's
-full-spool rescan is fine at heart's one-day horizon and wrong at plexus's
+the cause drill-down. Insights come from the ledger, not the journal — pulse's
+full-journal rescan is fine at heart's one-day horizon and wrong at plexus's
 multi-week one. `stack` is the factory-wide rollup no single organ has.
 """
 from __future__ import annotations
@@ -27,15 +27,15 @@ def _now() -> datetime.datetime:
 
 def _last_activity(goal_id: str, goal_records: list[dict]) -> datetime.datetime:
     latest = max(r["ts"] for r in goal_records)
-    try:  # the spool adds heart/arteries activity between ledger writes
-        from heart.pulse import load_events  # ponytail: full-spool scan, prune by day file if slow
+    try:  # the journal adds heart/arteries activity between ledger writes
+        from heart.pulse import load_events  # ponytail: full-journal scan, prune by day file if slow
         for e in load_events():
             if ((e.get("payload") or {}).get("goal_id") == goal_id
                     or str(e.get("task_id", "")).startswith(goal_id + "-")):
                 if e.get("ts", "") > latest:
                     latest = e["ts"]
     except Exception:
-        pass  # spool is best-effort; the ledger alone still answers
+        pass  # journal is best-effort; the ledger alone still answers
     return datetime.datetime.fromisoformat(latest)
 
 
@@ -54,10 +54,10 @@ def _silent_layers(recs: list[dict], root: str, sample: int = 10) -> str | None:
         from heart.pulse import load_events
         events = [e for e in load_events() if e.get("episode_id") in recent]
     except Exception:
-        return None  # no spool to judge by; say nothing rather than cry wolf
+        return None  # no journal to judge by; say nothing rather than cry wolf
     seen = {e.get("source") for e in events}
     if not seen:
-        return None  # episodes older than the spool's retention — not evidence
+        return None  # episodes older than the journal's retention — not evidence
     # capillaries emits a gate decision on every turn now (retrieve or skip), so
     # it is genuinely silent only when unwired or its DB is down — the same two
     # causes as arteries, distinguished below.
@@ -150,7 +150,7 @@ def insights(root: str = ".") -> list[str]:
         lines.append(f"retry rescue: first-attempt-failed={len(failed_first)} rescued={rescued}")
     # durable per-goal spend: run.py stamps each landed/failed attempt with the
     # cost of every candidate it ran. Summed here so a multi-week goal's bill
-    # survives the spool's day-scale retention (the spool's live total is `stack`).
+    # survives the journal's day-scale retention (the journal's live total is `stack`).
     costed = [r for r in recs if r.get("cost_usd") is not None]
     if costed:
         cost = sum(r["cost_usd"] for r in costed)
@@ -166,13 +166,69 @@ def insights(root: str = ".") -> list[str]:
     return lines
 
 
+def _metrics(recs: list[dict], goal_id: str) -> dict:
+    """Digest primitives for one goal: spend, feature lead times, escalation
+    counts. Spend is non-local by construction — heart prices local models to
+    0.0, so cost_usd already sums only metered APIs and subscription seats
+    billed at API rates."""
+    rows = [r for r in recs if r.get("goal_id") == goal_id]
+    kinds = Counter(r["kind"] for r in rows)
+    started: dict[str, str] = {}
+    lead: list[float] = []
+    for r in rows:
+        fid = r.get("feature_id")
+        if not fid:
+            continue
+        if r["kind"] == "feature.started" and fid not in started:
+            started[fid] = r["ts"]
+        elif r["kind"] == "feature.landed" and fid in started:
+            lead.append((datetime.datetime.fromisoformat(r["ts"])
+                         - datetime.datetime.fromisoformat(started[fid])).total_seconds())
+    touched = len({r["feature_id"] for r in rows
+                   if r.get("feature_id") and r["kind"] == "feature.started"})
+    spend = sum(r["cost_usd"] for r in rows if r.get("cost_usd") is not None)
+    return {"spend": round(spend, 4),
+            "lead_p50": _pct(lead, .5), "lead_n": len(lead),
+            "landed": kinds["feature.landed"],
+            "esc_raised": kinds["escalation.raised"], "touched": touched,
+            "esc_rate": kinds["escalation.raised"] / touched if touched else 0.0}
+
+
+def report(roots: list[str | Path]) -> list[str]:
+    """Fleet digest: one row per goal — spend, median feature lead time, and
+    escalation rate (escalations raised per feature touched) — plus a fleet
+    total. The three numbers a multi-project menu is judged on, joined from
+    each repo's ledger. `plexus insights` is the single-goal deep read; this is
+    the across-projects scoreboard."""
+    lines = [f"{'goal':<26} {'spend':>9}  {'lead_p50':>9}  {'esc/feat':>8}  landed"]
+    tot_spend = tot_esc = tot_touch = 0.0
+    seen = 0
+    for root in roots:
+        recs = read(root)
+        for gid in dict.fromkeys(r["goal_id"] for r in recs if r.get("goal_id")):
+            m = _metrics(recs, gid)
+            lead = f"{m['lead_p50']:.0f}s" if m["lead_n"] else "—"
+            lines.append(f"{gid[:26]:<26} ${m['spend']:>8.4f}  {lead:>9}  "
+                         f"{m['esc_rate']:>8.2f}  {m['landed']}")
+            tot_spend += m["spend"]
+            tot_esc += m["esc_raised"]
+            tot_touch += m["touched"]
+            seen += 1
+    if not seen:
+        return ["no goals recorded"]
+    lines.append(f"\nfleet: ${tot_spend:.4f} spend · {int(tot_esc)} escalation(s) "
+                 f"over {int(tot_touch)} feature(s) across {seen} goal(s)")
+    return lines
+
+
 def stack(hours: float = 24) -> list[str]:
-    """Factory-wide rollup of the shared spool by source — event volume,
+    """Factory-wide rollup of the shared journal by source — event volume,
     failures, store degradation across heart/arteries/capillaries/marrow/plexus."""
     from heart.pulse import load_events
-    cutoff = (_now() - datetime.timedelta(hours=hours)).isoformat()
+    # hours 0 means all time; "" sorts below every ISO timestamp
+    cutoff = "" if not hours else (_now() - datetime.timedelta(hours=hours)).isoformat()
     events = [e for e in load_events() if e.get("ts", "") >= cutoff]
-    lines = [f"window: last {hours:g}h  events={len(events)}"]
+    lines = [f"window: {f'last {hours:g}h' if hours else 'all time'}  events={len(events)}"]
     by_source = Counter(e.get("source", "?") for e in events)
     fails = Counter(e.get("source", "?") for e in events
                     if str(e.get("kind", "")).endswith(".failed"))
@@ -185,11 +241,13 @@ def stack(hours: float = 24) -> list[str]:
                    if (e.get("payload") or {}).get("store") in ("jsonl", "lost"))
     if degraded:
         lines.append(f"  DEGRADED: {degraded} ledger write(s) fell back from Postgres")
-    # factory-wide spend: sum cost off role.finished only — the atomic
-    # per-invocation event. Summing episode.finished as well would
-    # double-count: its cost is the sum of its roles.
+    # factory-wide spend: role.finished is the atomic per-invocation event for
+    # an episode, turn.observed the equivalent for an interactive CLI turn.
+    # Disjoint producers (heart and arteries), so both count. episode.finished
+    # stays out — its cost is the sum of its own roles, so adding it doubles
+    # every episode.
     priced = [(e.get("payload") or {}) for e in events
-              if e.get("kind") == "role.finished"]
+              if e.get("kind") in ("role.finished", "turn.observed")]
     priced = [p for p in priced if p.get("cost_usd") is not None]
     if priced:
         cost = sum(p["cost_usd"] for p in priced)
