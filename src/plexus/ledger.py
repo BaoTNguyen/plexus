@@ -2,7 +2,7 @@
 
 Write order is fixed: ledger first (must succeed, fsynced), spine second
 (best effort — heart's emit() swallows everything by design). State is
-decided from the ledger alone; the spool is only ever a staleness signal.
+decided from the ledger alone; the journal is only ever a staleness signal.
 """
 from __future__ import annotations
 

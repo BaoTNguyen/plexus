@@ -17,7 +17,7 @@ is a derived view and may be regenerated or lost without losing truth.
 | Episode execution (diff, verifiers, reward) | heart `runs/<id>/episode.json` | spine events, `episodes.jsonl` export | — |
 | Goals, plans, features, acceptance, escalations | plexus `.plexus/ledger.jsonl` | spine events, `labels.jsonl`/`plans.jsonl` exports | none — fsynced, must succeed |
 | Training runs, checkpoints | marrow | spine events | — |
-| Live cross-stack view | — (derived only) | the spine spool | — |
+| Live cross-stack view | — (derived only) | the spine journal | — |
 
 Rules that keep the stores from conflicting:
 
@@ -32,7 +32,7 @@ Rules that keep the stores from conflicting:
    owns (short failure tails for retry context are the one bounded exception).
 4. **Joins use recorded ids, never parsed strings.** The
    `<goal_id>-<feature_id>-a<attempt>` task_id convention is a grep
-   convenience for the spool; correctness always joins through the
+   convenience for the journal; correctness always joins through the
    `task_id`/`episode_id` fields recorded in ledger records.
 5. **Two rewards never merge.** Heart's verifier reward and plexus's
    acceptance label are different judgments of the same episode and are kept
@@ -76,7 +76,7 @@ the next attempt).
 
 `plexus export` derives two files from the ledger. Marrow joins them against
 heart's `episodes.jsonl` on `episode_id` (or `task_id`) and never reads the
-ledger or the spool directly.
+ledger or the journal directly.
 
 `labels.jsonl` — one record per attempt:
 
