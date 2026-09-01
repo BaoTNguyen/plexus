@@ -71,18 +71,37 @@ def _public_defs(src: str) -> set[str]:
             and not n.name.startswith("_")}
 
 
-def added_symbols(repo: str | Path, commit: str, paths: list[str]) -> set[str]:
-    """Public top-level names this commit introduced, as `module.name`. Compares
-    each touched file against its own parent revision, so a name that merely
-    moved within a file does not read as new."""
+def _symbol_delta(repo: str | Path, commit: str,
+                  paths: list[str]) -> tuple[set[str], set[str]]:
+    """(added, removed) public top-level names, as `module.name`. Compares each
+    touched file against its own parent revision, so a name that merely moved
+    within a file reads as neither."""
     added: set[str] = set()
+    removed: set[str] = set()
     for p in paths:
         if not p.endswith(".py"):
             continue
         after = _public_defs(_show(repo, f"{commit}:{p}"))
         before = _public_defs(_show(repo, f"{commit}~1:{p}"))
         added |= {f"{Path(p).stem}.{n}" for n in after - before}
-    return added
+        removed |= {f"{Path(p).stem}.{n}" for n in before - after}
+    return added, removed
+
+
+def added_symbols(repo: str | Path, commit: str, paths: list[str]) -> set[str]:
+    """Public top-level names this commit introduced."""
+    return _symbol_delta(repo, commit, paths)[0]
+
+
+def removed_symbols(repo: str | Path, commit: str, paths: list[str]) -> set[str]:
+    """Public top-level names this commit deleted or renamed away.
+
+    The mirror of `added_symbols`, and the more urgent half: an unplanned export
+    is clutter, an unplanned deletion is a caller somewhere that no longer
+    resolves. In this stack that caller is often in another repo — plexus imports
+    heart by name — so a removal nothing declared is the failure mode the pin
+    test exists to catch, seen one step earlier."""
+    return _symbol_delta(repo, commit, paths)[1]
 
 
 def _declared(feat: dict) -> set[str]:
@@ -109,16 +128,20 @@ def rows(spec, root: str | Path = ".", repo: str | Path | None = None) -> list[d
         paths = _show(repo, commit, "--name-only", "--format=").split()
         stray = _stray(paths, feat)
         declared = _declared(feat)
-        unplanned = sorted(s for s in added_symbols(repo, commit, paths)
-                           if s not in declared and s.split(".")[-1] not in declared)
+        added, gone = _symbol_delta(repo, commit, paths)
+        undeclared = lambda ss: sorted(
+            s for s in ss
+            if s not in declared and s.split(".")[-1] not in declared)
+        unplanned, dropped = undeclared(added), undeclared(gone)
         cls = classify(feat)
         out.append({
             "feature_id": r["feature_id"], "commit": commit, "class": cls,
             "stray_paths": stray, "unplanned_symbols": unplanned,
+            "removed_symbols": dropped,
             # spine and boundary are read because of what they are; leaf and
             # mechanical are read only when the diff broke its own promise
             "verdict": "READ" if cls in ("spine", "boundary")
-                       else ("FLAG" if stray or unplanned else "ok"),
+                       else ("FLAG" if stray or unplanned or dropped else "ok"),
         })
     return out
 
@@ -137,8 +160,8 @@ def report(spec, root: str | Path = ".", repo: str | Path | None = None) -> str:
     lines = []
     for d in data:
         paths = "ok" if not d["stray_paths"] else f"+{len(d['stray_paths'])} stray"
-        syms = ("ok" if not d["unplanned_symbols"]
-                else "+" + ",".join(d["unplanned_symbols"]))
+        syms = ", ".join(["+" + s for s in d["unplanned_symbols"]]
+                         + ["-" + s for s in d["removed_symbols"]]) or "ok"
         lines.append(f"{d['class']:<11}{d['feature_id']:<22}{d['commit'][:7]:<9}"
                      f"paths {paths:<12}symbols {syms:<28}{d['verdict']}")
     need = sum(1 for d in data if d["verdict"] != "ok")
@@ -146,6 +169,9 @@ def report(spec, root: str | Path = ".", repo: str | Path | None = None) -> str:
     for d in data:
         for p in d["stray_paths"]:
             lines.append(f"  {d['feature_id']}: unplanned path {p}")
+        for s in d["removed_symbols"]:
+            lines.append(f"  {d['feature_id']}: removed public {s} "
+                         f"— check who called it")
     return "\n".join(lines)
 
 

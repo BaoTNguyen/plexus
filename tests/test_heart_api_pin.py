@@ -8,6 +8,8 @@ Pinned surface (from src/plexus/run.py and src/plexus/plan.py):
     from heart.detect import detect_verifiers
     from heart.env import Workspace
     from heart.episode import best_episode, run_candidates
+    from heart.orchestrate import run_orchestrated
+    from heart.runner import CACHE_MULTIPLIERS
     from heart.taskspec import TaskSpec
 
 Two layers of pin:
@@ -34,6 +36,8 @@ from pathlib import Path
 from heart.detect import detect_verifiers
 from heart.env import Workspace
 from heart.episode import best_episode, run_candidates
+from heart.orchestrate import run_orchestrated
+from heart.runner import CACHE_MULTIPLIERS
 from heart.taskspec import TaskSpec
 
 BUGGY = "def add(a, b):\n    return a - b\n"
@@ -105,6 +109,38 @@ class TestHeartApiPin(unittest.TestCase):
         self.assertIn("patch", inspect.signature(Workspace.apply).parameters)
         inspect.signature(Workspace.destroy)  # must still exist/be callable
 
+    def test_run_orchestrated_signature(self):
+        # run.py's _build, when spec.orchestrate: run_orchestrated(
+        #     task, roles=..., agent=..., agent_cmd=..., runs_dir=...)
+        params = inspect.signature(run_orchestrated).parameters
+        names = list(params)
+        self.assertGreaterEqual(len(names), 1)  # task positional
+        for name in ("agent", "agent_cmd", "runs_dir", "roles"):
+            self.assertIn(name, params,
+                          f"run_orchestrated lost/renamed parameter {name!r}")
+
+    def test_run_orchestrated_returns_an_episode_shaped_dict(self):
+        # plexus reads the same keys off a Path-B result as a Path-A one, and
+        # two of them decide whether a feature lands: review_verdict gates on
+        # REJECT, usage prices the attempt. A Path B that omitted either would
+        # land unreviewed or bill as free.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = make_repo(root)
+            repo = str(root / "toyrepo")
+            task = TaskSpec(
+                task_id="pin-orch", repo_path=repo, base_commit=base,
+                prompt=FIX_CMD, public_verifiers=detect_verifiers(repo),
+                timeout_seconds=120)
+            ep = run_orchestrated(task, agent="shell", runs_dir=str(root / "runs"),
+                                  manifest={})
+        for key in ("episode_id", "outcome", "review_verdict", "reward", "usage"):
+            self.assertIn(key, ep, f"Path B result is missing {key!r}")
+        self.assertIn("total", ep["reward"])
+        self.assertIsInstance(ep["usage"], dict)
+        # best_episode must be able to rank a Path-B result alongside Path A
+        self.assertIs(best_episode([ep]), ep)
+
     def test_run_candidates_signature(self):
         # run.py: run_candidates(task, candidates, agent=spec.agent,
         #                         agent_cmd=spec.agent_cmd, runs_dir=str(...))
@@ -140,14 +176,28 @@ class TestHeartApiPin(unittest.TestCase):
         # roles= flows through **kwargs to run_episode, which must still accept it
         self.assertIn("roles", inspect.signature(run_episode).parameters)
 
+    def test_cache_multipliers_shape(self):
+        """serve.py prices subscription turns off its own per-provider rate card
+        and multiplies cache buckets by these. Heart owns the constant so the two
+        repos cannot drift; if heart renames a bucket, plexus's dollars go quietly
+        wrong rather than loudly missing, which is why this is pinned by key."""
+        self.assertEqual(set(CACHE_MULTIPLIERS),
+                         {"cache_read", "cache_write_5m", "cache_write_1h"})
+        # a read must stay cheaper than fresh input and a write dearer, or the
+        # arithmetic downstream is inverted rather than merely off
+        self.assertLess(CACHE_MULTIPLIERS["cache_read"], 1.0)
+        self.assertGreater(CACHE_MULTIPLIERS["cache_write_5m"], 1.0)
+        self.assertGreater(CACHE_MULTIPLIERS["cache_write_1h"],
+                           CACHE_MULTIPLIERS["cache_write_5m"])
+
     # ---- end-to-end behavioral pin ---------------------------------------
 
     def test_end_to_end_matches_plexus_usage(self):
-        old_spool = os.environ.get("HEART_SPOOL_DIR")
+        old_journal = os.environ.get("EVENT_JOURNAL_DIR")
         old_ingest = os.environ.get("HEART_INGEST")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            os.environ["HEART_SPOOL_DIR"] = str(root / "spool")
+            os.environ["EVENT_JOURNAL_DIR"] = str(root / "journal")
             os.environ["HEART_INGEST"] = "off"
             try:
                 commit = make_repo(root)
@@ -193,10 +243,10 @@ class TestHeartApiPin(unittest.TestCase):
                     task, 1, agent="shell", runs_dir=str(root / "runs")))
                 self.assertEqual(ep["outcome"], "pass")
             finally:
-                if old_spool is None:
-                    os.environ.pop("HEART_SPOOL_DIR", None)
+                if old_journal is None:
+                    os.environ.pop("EVENT_JOURNAL_DIR", None)
                 else:
-                    os.environ["HEART_SPOOL_DIR"] = old_spool
+                    os.environ["EVENT_JOURNAL_DIR"] = old_journal
                 if old_ingest is None:
                     os.environ.pop("HEART_INGEST", None)
                 else:

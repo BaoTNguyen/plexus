@@ -92,11 +92,40 @@ capillaries and arteries; its run sandbox becomes heart's worktrees. Rejected:
 the container/bwrap sandbox and bearer-authed HTTP control plane — this is a
 single-user local stack and heart already owns isolation. A web UI was rejected
 for the autonomous loop itself and then deliberately added back for the
-*supervision* surface (`plexus serve`): a stdlib-http, no-build dashboard over
-the ledger for deciding which goal to advance, answering blocks, and stopping a
-run — the decisions a CLI genuinely does not cover. State still lives in
-`.plexus/*.jsonl`; the dashboard is a lens plus three write paths (approve,
-resolve, run/stop) that call the same code the CLI does.
+*supervision* surface (`plexus serve`): a typed React control plane, compiled
+to static assets and served by the existing stdlib HTTP process, over the
+ledger for deciding which goal to advance, answering blocks, and stopping a
+run — the decisions a CLI genuinely does not cover. Node is a development
+tool only; the installed Python package contains the production assets. State still lives in
+`.plexus/*.jsonl`; the dashboard is a lens plus write paths (approve, resolve,
+run/stop, and the fleet controls below) that call the same code the CLI does.
+
+Because one dashboard scans a parent of several goals, it is also where the
+fleet shares scarce resources. Three live knobs stamp into every run it
+launches: **local slots** (`HEART_LOCAL_SLOTS`, heart's cross-process cap on
+agents hitting the one local model server), **global agents**
+(`HEART_MAX_AGENTS_GLOBAL`, a cap on all agents for a shared paid key or
+throttled subscription seat), and **max goals** (how many `Run all` starts at
+once). The caps are heart's mechanism; the dashboard is just the control
+surface, so a goal launched from a terminal with the same env is bounded the
+same way.
+
+To advance the fleet without a browser, `plexus fleet run` is the headless twin
+of `Run all`: it starts every approved, idle, unblocked goal (skipping any a
+human still owns via an open escalation), up to `--max-goals` (default 3),
+carrying the same caps, and exits once the fleet is drained. It honors a rolling
+`--cost-ceiling` (non-local spend over `--cost-window-hours`; local models are
+free, subscription seats counted at API rates) and an optional `--run-window`.
+Because it exits when drained and one run holds each goal's flock, a `oneshot`
+timer never overlaps itself:
+
+```ini
+# ~/.config/systemd/user/plexus-fleet.service   (Type=oneshot)
+[Service]
+ExecStart=%h/.local/bin/plexus fleet run --root %h/projects \
+          --max-goals 3 --cost-ceiling 5 --run-window 22:00-08:00
+# ~/.config/systemd/user/plexus-fleet.timer  ->  OnCalendar=*:0/30  (every 30 min)
+```
 
 ## What plexus owns vs. delegates
 
@@ -202,8 +231,28 @@ buy back review time:
   the only artifact here the agent cannot route around, which is what makes the
   rest of them worth trusting.
 - **`contract`** — the public symbols the feature adds or changes. Nothing blocks
-  on it; `plexus review` AST-diffs each landed commit against it and flags what
-  was exported but never planned.
+  on it; `plexus review` AST-diffs each landed commit against it in both
+  directions and flags what was exported but never planned — and what was
+  *deleted* but never planned, which is the half that breaks callers. In this
+  stack the caller is often in the next repo up, so an undeclared removal is the
+  heart API pin failing one step early.
+
+A feature that changes what a command prints ends its `spec` with an `expect:`
+block — a `$ command` line and the literal lines it must print. That block is
+executed in the acceptance worktree once the criterion passes, and a missing
+line fails the attempt. It is the one place a mockup you wrote before any code
+existed turns into a check, which is the whole point of writing it:
+
+```
+expect:
+$ plexus review --plan
+leaf       classify    risk classifier over plan features
+1 of 4 features will need line-by-line review.
+```
+
+Matching is containment, not equality — a plan-time mockup cannot predict ids or
+timings — and a mismatch files under **intent**, because the code worked and
+simply isn't what was signed off.
 
 From those two, before any episode runs, every feature gets a class:
 
@@ -218,6 +267,33 @@ A class is judged by what the allowlist *permits*, not by what the plan meant:
 `src/plexus/*` reads as `spine` because it could reach the ledger. Narrowing the
 glob is how you buy a cheaper review, and `plexus plan` prints the class next to
 each feature so you can do that at the one moment it is still free.
+
+**The software-factory boundary — what agents land vs. what waits for you.**
+`leaf` and `mechanical` features auto-land once they're green: acceptance
+passed, nothing regressed, the reviewer didn't reject, the diff kept its
+promise. `spine` and `boundary` do not — they stop for a signature, green or
+not, because that is the default a factory has to have. Land your riskiest
+commits unread and the review surface is decoration.
+
+```toml
+[review]
+hold = ["spine", "boundary"]   # the default; hold = [] to land everything
+pr_base = "main"               # goal finishes green -> push + open a PR here
+```
+
+A held feature that passes acceptance raises a `held_for_review` escalation
+instead of committing; `plexus resolve <feature>` (or the dashboard's Resolve)
+signs it off and the next `run` lands it. So the risk class isn't just a
+post-hoc "what to read" — it's the gate that decides which work agents own
+outright and which stops for you, before the commit exists.
+
+When the whole goal finishes green, `run` pushes the goal branch and opens a PR
+into `pr_base` with the `plexus review` table as its body, so the diff arrives
+with its own reading list. The PR is per goal rather than per feature on
+purpose: features are ordered and each builds on the commit before it, so
+parking a risky one on a side branch would strand everything behind it. Risk is
+gated earlier, by the hold. Best-effort throughout — no remote, no `gh`, or no
+network costs a line of output, never the run.
 
 ```console
 $ plexus review --plan          # before the run: what will cost you attention
@@ -242,6 +318,64 @@ repo. A feature that needs a change upstream is split and ordered by hand.
 CI enforces the order rather than trusting it: a PR into `main` is tested against
 heart's `main`, while `dev` is tested against heart's `dev`. A plexus change that
 depends on unlanded heart work goes green on `dev` and red on the PR.
+
+Every repo in the stack carries the same workflow and the same matrix rule, each
+checking out the siblings it actually imports — capillaries alone, arteries with
+capillaries, heart with both, plexus with heart. marrow imports nothing and runs
+by itself. So the ordering constraint is enforced at every edge of the chain, not
+only the one plexus happens to sit on.
+
+What plexus automates is the *detection and the seeding*, not the orchestration.
+A feature may declare `needs_upstream = ["heart.taskspec:TaskSpec.foo", …]` —
+modules or `module:Symbol` names it depends on. Before dispatching, `run` checks
+each against the live editable installs; a miss raises an `upstream_not_ready`
+escalation naming the module, instead of burning attempts on a run that cannot
+pass — the same discipline as the pin test, now caught at dispatch rather than
+by a red suite.
+
+Then it seeds the fix. A registry maps each top-level package to the repo that
+provides it — and it wires itself. Every repo plexus tracks already names its
+package in `pyproject.toml`, so the map is *derived* from the same workspace the
+menu scans; `registry.json` is only for explicit pins and out-of-tree repos:
+
+```json
+// $XDG_CONFIG_HOME/plexus/workspace.json  — the menu + the derived registry
+{"roots": ["/home/me/Coding/Projects"]}
+// $XDG_CONFIG_HOME/plexus/registry.json   — optional overrides (win over derived)
+{"heart": "/home/me/Coding/Projects/heart"}
+```
+
+When a downstream goal declares a missing upstream symbol, `run` writes a goal
+into the owning repo — a ready-to-plan `plexus.toml` if it has none, or an
+`upstream.requested` ledger record if it already carries its own goal (never
+clobbering it). The request is idempotent and names who asked for what. So the
+menu's other projects light up with the upstream work a downstream goal needs,
+without you remembering to file it. The goal still runs in one repo; only the
+gate and the hand-off are automatic. (See `src/plexus/registry.py`.)
+
+### Adding projects — the workspace
+
+The menu is a workspace of project directories, the way an IDE opens folders. A
+root is a single repo or a parent of several; `plexus serve`/`report`/`fleet`
+scan all of them. Two ways to grow it:
+
+- **Drop a repo under a workspace root** — `cd newthing && plexus init`. It
+  appears on the next scan and its package wires into the registry from its
+  pyproject. Nothing to edit.
+- **`plexus add <path>`** — register a repo living anywhere else (the "Add
+  Folder to Workspace" move); the dashboard has the same input in its header.
+
+The derived registry means a new project is import-resolvable for cross-repo
+seeding the moment it's in the workspace — no second step.
+
+In `plexus serve`, the menu is a **grid** (the mission-control shape): a search
+box, a **pinned** section, and projects **grouped by a label** you assign
+(colored dot derived from the label). Each group and the pinned section carry a
+**Run-all** that advances only that group's idle goals — so you can run one
+project at a time, exactly the split you asked for. Labels and pins are view
+state in `workspace.json` (`projects: {path: {label, pinned}}`), never in the
+goal repo's ledger. Like mission-control, plexus only ever *references* a repo —
+`add`/label/unpin touch the workspace file, never the project's files.
 
 ## Observability
 
@@ -271,10 +405,10 @@ averages). Plexus builds none of that again. It joins the spine:
 One boundary heart's model must not blur: **the spine is telemetry, never a
 system of record.** `emit()` swallows every exception by design — right for
 observability, disqualifying for state. Heart can afford that because losing
-its spool loses nothing; plexus cannot, because a dropped event read back as
+its journal loses nothing; plexus cannot, because a dropped event read back as
 state would skip a feature or re-run a landed one. So the write order is
 fixed: ledger first (must succeed), spine second (best effort), and `plexus
-status` decides state from the ledger alone — the spool only supplies the
+status` decides state from the ledger alone — the journal only supplies the
 staleness signal (running per ledger, but no episode events lately).
 
 The golden signals move up one level, and that is the actual division of
@@ -294,9 +428,9 @@ zombie, which heart's episode-level zombie rule cannot see). **Cause
 drill-down is delegated**: `plexus status` prints the failing feature's
 episode_ids so the next command is `pulse episode <id>`, not a plexus-specific
 viewer. Goal-level insights (lead times, escalation rate, rescue rate after
-retry) come from the **ledger**, not the spool: pulse's read side rescans the
-entire spool history per query, which is fine at heart's one-day horizon and
-wrong at plexus's multi-week one. Ledger for history, spool for the live
+retry) come from the **ledger**, not the journal: pulse's read side rescans the
+entire journal history per query, which is fine at heart's one-day horizon and
+wrong at plexus's multi-week one. Ledger for history, journal for the live
 window — `plexus insights` stays a small read-side function either way.
 
 ### What went wrong: the judgment surface
@@ -344,11 +478,24 @@ fired on escalation and goal completion. This deliberately stays out of
 heart — heart runs while you watch; plexus runs while you sleep.
 
 Finally, because plexus is the integrator, it owns the factory-wide vantage
-no single organ has: `plexus stack` rolls up the shared spool by source —
+no single organ has: `plexus stack` rolls up the shared journal by source —
 event volume, failures, and store degradation across heart, arteries,
 capillaries, marrow, and plexus in one view. Per-source depth stays with each
 repo's own tools; stack answers only "which organ is unhealthy," then hands
 off.
+
+The dashboard also carries a **live** tab per goal: while a run works, it
+polls and virtualizes that goal's spine events — role turns, retrieval, verifier rounds,
+reward, land — filtered to the goal's lineage across heart/arteries/capillaries,
+so supervision isn't blind between ledger writes. It's the structured,
+event-sourced answer to "watch the agent," not a raw terminal (plexus has no PTY
+to show); the ledger stays the coarse, durable record, the stream the live one.
+
+Where `stack` reads the live journal (heart's day horizon), `plexus report` reads
+the durable ledgers across the whole menu — one row per goal with the three
+numbers a multi-project fleet is judged on: non-local spend, median feature
+lead time, and escalation rate, plus a fleet total. `insights` is the
+single-goal deep read; `report` is the across-projects scoreboard.
 
 ## Code layout (current)
 
@@ -360,11 +507,14 @@ src/plexus/plan.py      planner episode -> plan.jsonl, sign-off gate
 src/plexus/run.py       the serial acceptance loop: dispatch, judge, land/retry/escalate, resume
 src/plexus/events.py    spine emission via heart.events, task_id convention
 src/plexus/ledger.py    system of record: fsynced JSONL, ledger-first write order
-src/plexus/observe.py   status (symptom check), insights (ledger), stack (spool rollup)
+src/plexus/observe.py   status (symptom check), insights (ledger), report (fleet digest), stack (journal rollup)
 src/plexus/diagnose.py  why (per-feature intent/logs/traces/bugs), phase attribution
 src/plexus/review.py    risk class from the plan, plan-vs-landed conformance report
-src/plexus/serve.py     control plane: local dashboard over the ledger (approve, resolve, run/stop)
-src/plexus/cli.py       plexus init | plan | approve | run | review | status | insights | why | stack | tail | serve
+src/plexus/registry.py  workspace + derived module->repo map; seeds a goal upstream when needs_upstream is unmet
+src/plexus/serve.py     control-plane API/static host over the ledger and journal + `plexus fleet run`
+frontend/               React + TypeScript + Vite control-plane source (`npm install`; `npm run dev|build`)
+src/plexus/static/      packaged production frontend generated by `npm --prefix frontend run build`
+src/plexus/cli.py       plexus init | add | plan | approve | run | review | status | insights | why | report | stack | tail | serve | fleet
 tests/test_plexus.py    self-check: python3 tests/test_plexus.py (stdlib, no network)
 tests/test_review.py    self-check for the scope gate and the conformance report
 ```
@@ -427,8 +577,12 @@ attempt counter, repair-feature synthesis, `notify_cmd`, any UI.
 2. Unattended operation: `notify_cmd` push on escalation/completion,
    failure-aware retry prompts, `--candidates N` best-of-N on retries,
    repair-feature synthesis after full-suite regression.
-3. Fleet mode: `plexus run` across multiple goals/repos on a schedule, cost
-   ledger, and a `plexus report` digest.
+3. Fleet mode: the dashboard runs several goals at once behind shared
+   concurrency caps, and `plexus fleet run` advances them unattended from a
+   systemd timer or cron — capped goals, a rolling cost ceiling (subscription
+   seats counted at API rates), an optional run-window, auto-stop when drained
+   (done — see the serve section). Still open: a `plexus report` digest, and
+   auto-seeding an upstream goal when `needs_upstream` isn't met.
 4. Flywheel export: `plexus export` emits acceptance labels, retry pairs, and
    plan outcomes keyed by task_id for marrow's training stages.
 
