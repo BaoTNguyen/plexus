@@ -8,6 +8,7 @@ Pinned surface (from src/plexus/run.py and src/plexus/plan.py):
     from heart.detect import detect_verifiers
     from heart.env import Workspace
     from heart.episode import best_episode, run_candidates
+    from heart.orchestrate import run_orchestrated
     from heart.runner import CACHE_MULTIPLIERS
     from heart.taskspec import TaskSpec
 
@@ -35,6 +36,7 @@ from pathlib import Path
 from heart.detect import detect_verifiers
 from heart.env import Workspace
 from heart.episode import best_episode, run_candidates
+from heart.orchestrate import run_orchestrated
 from heart.runner import CACHE_MULTIPLIERS
 from heart.taskspec import TaskSpec
 
@@ -106,6 +108,38 @@ class TestHeartApiPin(unittest.TestCase):
         # methods plexus calls on the instance: ws.apply(diff), ws.destroy()
         self.assertIn("patch", inspect.signature(Workspace.apply).parameters)
         inspect.signature(Workspace.destroy)  # must still exist/be callable
+
+    def test_run_orchestrated_signature(self):
+        # run.py's _build, when spec.orchestrate: run_orchestrated(
+        #     task, roles=..., agent=..., agent_cmd=..., runs_dir=...)
+        params = inspect.signature(run_orchestrated).parameters
+        names = list(params)
+        self.assertGreaterEqual(len(names), 1)  # task positional
+        for name in ("agent", "agent_cmd", "runs_dir", "roles"):
+            self.assertIn(name, params,
+                          f"run_orchestrated lost/renamed parameter {name!r}")
+
+    def test_run_orchestrated_returns_an_episode_shaped_dict(self):
+        # plexus reads the same keys off a Path-B result as a Path-A one, and
+        # two of them decide whether a feature lands: review_verdict gates on
+        # REJECT, usage prices the attempt. A Path B that omitted either would
+        # land unreviewed or bill as free.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = make_repo(root)
+            repo = str(root / "toyrepo")
+            task = TaskSpec(
+                task_id="pin-orch", repo_path=repo, base_commit=base,
+                prompt=FIX_CMD, public_verifiers=detect_verifiers(repo),
+                timeout_seconds=120)
+            ep = run_orchestrated(task, agent="shell", runs_dir=str(root / "runs"),
+                                  manifest={})
+        for key in ("episode_id", "outcome", "review_verdict", "reward", "usage"):
+            self.assertIn(key, ep, f"Path B result is missing {key!r}")
+        self.assertIn("total", ep["reward"])
+        self.assertIsInstance(ep["usage"], dict)
+        # best_episode must be able to rank a Path-B result alongside Path A
+        self.assertIs(best_episode([ep]), ep)
 
     def test_run_candidates_signature(self):
         # run.py: run_candidates(task, candidates, agent=spec.agent,
