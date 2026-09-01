@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 
 tmp = Path(tempfile.mkdtemp(prefix="plexus-review-test-"))
-os.environ["HEART_SPOOL_DIR"] = str(tmp / "spool")
+os.environ["EVENT_JOURNAL_DIR"] = str(tmp / "journal")
 
 here = Path(__file__).resolve()
 for p in (here.parents[1] / "src", here.parents[2] / "heart" / "src"):
@@ -86,8 +86,11 @@ def commit(files: dict[str, str], msg: str) -> str:
         p = repo / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(body)
-    subprocess.run([*git, "add", "-A"], check=True)
-    subprocess.run([*git, "commit", "-qm", msg], check=True)
+    # pathspec, not `add -A`: run.py's _land commits exactly the diff's paths,
+    # and once .plexus/ exists a blanket add would sweep the ledger into the
+    # feature commit and make every later feature look like a scope violation
+    subprocess.run([*git, "add", "--", *files], check=True)
+    subprocess.run([*git, "commit", "-qm", msg, "--", *files], check=True)
     return subprocess.run([*git[:3], "rev-parse", "HEAD"],
                           capture_output=True, text=True, check=True).stdout.strip()
 
@@ -152,6 +155,7 @@ assert rows["f1"]["stray_paths"] == [] and rows["f1"]["unplanned_symbols"] == []
 assert rows["f1"]["verdict"] == "ok", "a feature that kept its promise costs no attention"
 assert rows["f2"]["stray_paths"] == ["src/one.py"], rows["f2"]
 assert rows["f2"]["unplanned_symbols"] == ["two.gamma"], rows["f2"]
+assert rows["f2"]["removed_symbols"] == [], "f2 edited alpha, it did not delete it"
 assert rows["f2"]["verdict"] == "FLAG"
 
 text = review.report(FakeSpec, repo, repo)
@@ -167,5 +171,86 @@ assert rows2["f1"]["stray_paths"] == []
 
 assert "2 of 2 features will need line-by-line review." not in review.preview(repo)
 assert "1 of 2 features will need line-by-line review." in review.preview(repo)
+
+# --- a deletion nobody declared -------------------------------------------
+# The half `added_symbols` alone cannot see. A commit that quietly drops a
+# public name leaves callers unresolved, and in this stack the caller is often
+# in the next repo up, so this is the pin test's failure one step earlier.
+c3 = commit({"src/two.py": "def beta():\n    return 2\n"}, "plexus: land f3")
+plan.append({"plan_id": "p1", "id": "f3", "title": "tidy", "spec": "s",
+             "acceptance": "true", "touches": ["src/two.py"], "contract": []})
+(plan_dir / "plan.jsonl").write_text("".join(json.dumps(f) + "\n" for f in plan))
+ledger.record("feature.landed", goal_id="g1", feature_id="f3", root=repo, commit=c3)
+
+rows3 = {r["feature_id"]: r for r in review.rows(FakeSpec, repo, repo)}
+assert rows3["f3"]["removed_symbols"] == ["two.gamma"], rows3["f3"]
+assert rows3["f3"]["unplanned_symbols"] == []
+assert rows3["f3"]["verdict"] == "FLAG", "an undeclared deletion must not read as ok"
+assert "removed public two.gamma" in review.report(FakeSpec, repo, repo)
+
+# declaring the removal in `contract` is how you say you meant it
+plan[-1]["contract"] = ["two.gamma"]
+(plan_dir / "plan.jsonl").write_text("".join(json.dumps(f) + "\n" for f in plan))
+rows4 = {r["feature_id"]: r for r in review.rows(FakeSpec, repo, repo)}
+assert rows4["f3"]["removed_symbols"] == [] and rows4["f3"]["verdict"] == "ok"
+
+# --- expect blocks: the mockup is executed, not filed ----------------------
+from plexus.plan import parse_expect  # noqa: E402
+from plexus.run import _check_expect  # noqa: E402
+
+assert parse_expect("just a spec") is None
+assert parse_expect("does what it says\n\nexpect:\nno command here") is None, \
+    "a block with no `$ ` line is prose, not a mockup"
+cmd, want = parse_expect(
+    "print two lines\n\nexpect:\n$ echo hi\nhi\n\nthere\n")
+assert cmd == "echo hi" and want == ["hi", "there"], (cmd, want)
+# the format asks for the block at the end, so a spec that mentions one earlier
+# must not shadow the real one
+assert parse_expect("expect:\n$ false\nold\n\nexpect:\n$ true\nnew")[0] == "true"
+
+ok, tail = _check_expect(str(repo), ("printf 'a\\nb\\n'", ["a", "b"]), 30)
+assert ok and tail == ""
+ok, tail = _check_expect(str(repo), ("printf 'a\\n'", ["a", "zzz"]), 30)
+assert not ok and "zzz" in tail and "actual output" in tail, tail
+# containment, not equality: a mockup cannot predict every line around it
+ok, _ = _check_expect(str(repo), ("printf 'noise\\nwanted\\nmore\\n'", ["wanted"]), 30)
+assert ok, "extra output around the promised lines is not a mismatch"
+# a command that fails still counts if it printed the promised lines — the
+# exit code is the acceptance criterion's job, and it already ran
+ok, _ = _check_expect(str(repo), ("echo boom; false", ["boom"]), 30)
+assert ok
+
+# an expect mismatch is an intent failure: the code works, it just isn't what
+# was signed off, so `plexus why` must not file it under coding
+from plexus.diagnose import _PHASE, classify_phase  # noqa: E402
+
+assert _PHASE["expect_mismatch"] == "intent"
+assert classify_phase("expect_mismatch", "pass", False) == "intent"
+
+# --- review_hold is on out of the box --------------------------------------
+# The whole surface is decoration if the riskiest commits still auto-land, so
+# the default is the policy, not the empty tuple.
+from plexus.spec import GoalSpec  # noqa: E402
+
+assert set(GoalSpec.review_hold) == {"spine", "boundary"}
+
+# --- opening the PR never costs the run ------------------------------------
+# Every way this can be unavailable has to return a string, not raise: the goal
+# is already committed by the time it runs, so a missing remote must not turn a
+# finished goal into a failed one. No network is touched by any of these paths.
+from plexus.run import _open_pr  # noqa: E402
+
+
+class PRSpec:
+    goal_id = "g1"
+    pr_base = "main"
+
+
+assert "no git remote" in _open_pr(PRSpec, repo, str(repo))
+PRSpec.pr_base = ""
+assert _open_pr(PRSpec, repo, str(repo)) == "", "pr_base='' opts out entirely"
+PRSpec.pr_base = "main"
+subprocess.run([*git, "checkout", "-qb", "main"], check=True)
+assert "nothing to merge into main" in _open_pr(PRSpec, repo, str(repo))
 
 print("plexus review self-check ok")
