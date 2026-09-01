@@ -1,0 +1,16 @@
+[Unit]
+Description=Dynamic LLM model manager (hot-swap control plane)
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/bao-tn/llm-manager/model_manager.py
+Restart=on-failure
+RestartSec=5
+# Manager process itself is lightweight (Flask + subprocess control) —
+# this cap is NOT for the model process, which the manager launches
+# separately. It's a backstop against the control plane itself leaking.
+MemoryHigh=1G
+MemoryMax=2G
+
+[Install]
+WantedBy=default.target

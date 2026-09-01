@@ -18,18 +18,21 @@ Merging them is marrow's job, never plexus's.
 from __future__ import annotations
 
 import fcntl
+import importlib
 import os
+import re
 import subprocess
 from pathlib import Path
 
 from heart.detect import detect_verifiers
 from heart.env import Workspace
 from heart.episode import DEFAULT_ROLES, best_episode, run_candidates
+from heart.orchestrate import run_orchestrated
 from heart.taskspec import TaskSpec
 
-from . import events, ledger
+from . import events, ledger, scope
 from .plan import matches as _matches
-from .plan import load_plan
+from .plan import execution_order, load_plan, parse_expect
 
 # heart episode outcomes that are mechanical failures — no valid applied diff to
 # judge a criterion against, so acceptance is skipped and it's a coding failure.
@@ -43,6 +46,10 @@ _MECHANICAL = {
     # violation. Kept as its own class so `plexus why` names it instead of hiding
     # a leaked credential behind a generic episode_error.
     "guardrail_violation": "guardrail_violation",
+    # the sandbox refused writes the spec had permitted: a misconfiguration on
+    # our side, not a coding failure. Named so `plexus why` says so, and so the
+    # retry can widen the scope instead of asking the agent to try harder.
+    "scope_denied": "scope_denied",
 }
 
 # The agent's channel to ask for a decision instead of guessing. A line
@@ -88,19 +95,84 @@ def _lock_goal(root: Path) -> None:
     _LOCKS[key] = f
 
 
+def _build(spec, task, candidates: int, roles, runs_dir) -> list[dict]:
+    """One attempt at a feature: N candidate episodes, best-of picked by caller.
+
+    `orchestrate` hands the feature to heart's Path B, which may split it into a
+    dependency graph of workers built in waves and merged with git — and falls
+    back to a single build on its own when the feature will not split, when the
+    repo has no verifier, or when the plan is invalid. Plexus does not second-
+    guess any of that: it decides *what* to build, heart decides *how*.
+
+    The two orderings are different scales and neither replaces the other. This
+    loop is still strictly serial in features, because plexus walks its own DAG
+    one node at a time and the next feature builds on the last one's landed
+    commit. What changes is that a single feature is no longer forced to be one
+    sequential agent.
+
+    # ponytail: orchestrated candidates run one after another rather than in
+    # parallel like run_candidates does. N is 1 in every default config, and N
+    # concurrent decompositions is N * waves agents against one rate limit.
+    """
+    kwargs = dict(agent=spec.agent, agent_cmd=spec.agent_cmd, runs_dir=str(runs_dir))
+    if not spec.orchestrate:
+        return run_candidates(task, candidates, roles=roles, **kwargs)
+    return [run_orchestrated(task, roles=roles, **kwargs) for _ in range(max(1, candidates))]
+
+
 def _episode_cost(episodes: list[dict]) -> dict:
     """Sum usage across every candidate actually run this attempt — best-of-N
     pays for the losing candidates too, so cost must count them, not just the
     winner. A key is omitted when heart couldn't price the agent (usage None),
     so a missing field means 'unknown', never 'zero'. Feeds the durable ledger;
-    the live factory-wide total lives on the spool (`plexus stack`)."""
+    the live factory-wide total lives on the journal (`plexus stack`)."""
     out: dict = {}
-    for k in ("cost_usd", "tokens_in", "tokens_out"):
+    # cache buckets ride alongside tokens_in rather than inside it: heart prices
+    # them at different multipliers, so a consumer that summed them would bill a
+    # cache read at ten times its rate. cost_usd already has them folded in.
+    for k in ("cost_usd", "tokens_in", "tokens_out",
+              "cache_read", "cache_write_5m", "cache_write_1h"):
         vals = [e["usage"][k] for e in episodes
                 if (e.get("usage") or {}).get(k) is not None]
         if vals:
             out[k] = round(sum(vals), 6) if k == "cost_usd" else sum(vals)
     return out
+
+
+def _goal_spend(recs: list[dict]) -> dict:
+    """Roll up what a goal has spent: episode count plus summed usage across every
+    attempt (feature.landed/failed carry per-attempt cost). Uses distinct
+    `spend_*` keys, never `cost_usd`/`tokens_*`, so the per-attempt cost summers
+    (observe.insights/report, the fleet cost ceiling) don't double-count this
+    aggregate. A usage key is omitted when nothing priced the goal — unknown, not
+    zero, same convention as _episode_cost."""
+    out: dict = {"episodes_total": sum(1 for r in recs if r["kind"] == "feature.started")}
+    for src, dst in (("cost_usd", "spend_usd"), ("tokens_in", "spend_tokens_in"),
+                     ("tokens_out", "spend_tokens_out")):
+        vals = [r[src] for r in recs if r.get(src) is not None]
+        if vals:
+            out[dst] = round(sum(vals), 6) if src == "cost_usd" else sum(vals)
+    return out
+
+
+def _missing_upstream(specs: list[str]) -> list[str]:
+    """Which of a feature's declared `needs_upstream` symbols aren't importable
+    yet. Each spec is 'module.path' or 'module.path:Symbol'. Repos are otherwise
+    independent (no cross-repo orchestration), so this is how a downstream goal
+    detects that an upstream change it depends on hasn't landed — checked against
+    the live editable installs, the same surface `test_*_api_pin.py` guards by
+    hand. A miss escalates rather than burning attempts on a doomed run."""
+    missing = []
+    for spec in specs:
+        mod, _, sym = spec.partition(":")
+        try:
+            m = importlib.import_module(mod)
+        except Exception:
+            missing.append(spec)
+            continue
+        if sym and not hasattr(m, sym):
+            missing.append(spec)
+    return missing
 
 
 def _git(repo: str | Path, *args: str) -> str:
@@ -152,26 +224,66 @@ def _verifier_tail(ep: dict, limit: int = 1000) -> str:
 
 
 def _run_acceptance(repo: str | Path, base_commit: str, diff: str,
-                    command: str, timeout: int) -> tuple[bool, str]:
+                    command: str, timeout: int,
+                    expect: tuple[str, list[str]] | None = None,
+                    ) -> tuple[bool, str, str]:
     """Plexus's own judgment, in its own clean worktree: check out the base,
     apply the episode's diff, run the feature criterion. Deliberately outside
     heart's episode so heart's reward stays a pure regression signal (see module
-    docstring). Reuses heart's Workspace — worktrees belong to heart."""
+    docstring). Reuses heart's Workspace — worktrees belong to heart.
+
+    Returns (passed, tail, stage) where stage names which check said no —
+    "acceptance" or "expect". The two are different failures: an acceptance
+    failure means the code does not work, an expect failure means it works and
+    does not look like what was approved, and only the second is a plan-time
+    problem. Both run in the one worktree because building a second to re-run
+    the mockup would double the setup cost of every feature that has one."""
     ws = Workspace(str(repo), base_commit)
     try:
         try:
             ws.apply(diff)
         except RuntimeError as exc:
             # diff won't apply in plexus's tree either — acceptance can't pass
-            return False, f"acceptance could not apply the diff: {exc}"[-1000:]
+            return False, f"acceptance could not apply the diff: {exc}"[-1000:], "acceptance"
         try:
             r = subprocess.run(command, shell=True, cwd=str(ws.path),
                                capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
-            return False, "acceptance command timed out"
-        return r.returncode == 0, (r.stdout + r.stderr).strip()[-1000:]
+            return False, "acceptance command timed out", "acceptance"
+        if r.returncode != 0:
+            return False, (r.stdout + r.stderr).strip()[-1000:], "acceptance"
+        if expect:
+            ok, tail = _check_expect(str(ws.path), expect, timeout)
+            if not ok:
+                return False, tail, "expect"
+        return True, (r.stdout + r.stderr).strip()[-1000:], ""
     finally:
         ws.destroy()
+
+
+def _check_expect(cwd: str, expect: tuple[str, list[str]],
+                  timeout: int) -> tuple[bool, str]:
+    """Run the spec's `expect:` mockup and check the promised lines appear.
+
+    Containment, not equality: a mockup written at plan time cannot predict
+    timings, paths or ids, and demanding an exact transcript would fail every
+    honest feature. Each promised line must show up somewhere in the output,
+    which is enough to catch the case this exists for — the command ran, and
+    printed something other than what was signed off."""
+    cmd, want = expect
+    try:
+        r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True,
+                           text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, f"expect command timed out: {cmd}"
+    got = r.stdout + r.stderr
+    missing = [l for l in want if l not in got]
+    if not missing:
+        return True, ""
+    return False, (f"`{cmd}` did not print what the spec promised.\n"
+                   + "missing line(s):\n"
+                   + "\n".join(f"  {l}" for l in missing[:10])
+                   + f"\nactual output:\n{got.strip()[-600:]}")
 
 
 def _resume_answer(recs: list[dict], goal_id: str, feature_id: str) -> str:
@@ -198,6 +310,16 @@ def _blocks_so_far(recs: list[dict], goal_id: str, feature_id: str) -> int:
                if r.get("goal_id") == goal_id and r.get("feature_id") == feature_id
                and r["kind"] == "escalation.raised"
                and r.get("reason_class") == "blocked_on_decision")
+
+
+def _held_before(recs: list[dict], goal_id: str, feature_id: str) -> bool:
+    """This feature already hit the review hold once. Since a still-open
+    escalation would have paused the run before we reached the land branch, a
+    prior hold means it was resolved — the operator signed off, so land it now
+    instead of holding forever."""
+    return any(r.get("goal_id") == goal_id and r.get("feature_id") == feature_id
+               and r["kind"] == "escalation.raised"
+               and r.get("reason_class") == "held_for_review" for r in recs)
 
 
 def _diff_paths(repo: str | Path, diff: str) -> list[str]:
@@ -233,6 +355,53 @@ def _land(repo: str | Path, diff: str, feature_id: str) -> str:
     return _head(repo)
 
 
+def _open_pr(spec, root: Path, repo: str) -> str:
+    """Push the goal branch and open (or refresh) a PR into `spec.pr_base`, with
+    the review report as the body.
+
+    Runs only after the goal is green, and is best-effort throughout: the work is
+    already committed locally, so a missing remote, a missing `gh`, or no network
+    costs a line of output and never the run's exit code. Nothing about the PR is
+    written to the ledger — GitHub is the system of record for a pull request,
+    and the ledger is telemetry (LEDGER law 2).
+
+    Why the PR is per-goal and not per-feature: features are ordered and each one
+    builds on the commit before it, so parking a risky feature on a side branch
+    would strand every feature after it. Risk is gated earlier instead, by
+    `review_hold` refusing to land the commit at all until you sign off."""
+    if not spec.pr_base:
+        return ""
+    try:
+        branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+        if branch == spec.pr_base or branch == "HEAD":
+            return f"on {branch}: no PR (nothing to merge into {spec.pr_base})"
+        if not _git(repo, "remote"):
+            return "no git remote: landed locally, no PR"
+        from .review import report
+        subprocess.run(["git", "-C", repo, "push", "-u", "origin", branch],
+                       capture_output=True, text=True, check=True, timeout=120)
+        body = ("Opened by `plexus run` for goal `" + spec.goal_id + "`.\n\n"
+                "## What to read\n\n```\n" + report(spec, root, repo) + "\n```\n")
+        view = subprocess.run(["gh", "pr", "view", branch, "--json", "url",
+                               "-q", ".url"], cwd=repo, capture_output=True,
+                              text=True, timeout=60)
+        if view.returncode == 0 and view.stdout.strip():
+            subprocess.run(["gh", "pr", "edit", branch, "--body", body], cwd=repo,
+                           capture_output=True, text=True, timeout=60)
+            return f"PR updated: {view.stdout.strip()}"
+        made = subprocess.run(
+            ["gh", "pr", "create", "--base", spec.pr_base, "--head", branch,
+             "--title", f"plexus: {spec.goal_id}", "--body", body],
+            cwd=repo, capture_output=True, text=True, timeout=120)
+        if made.returncode != 0:
+            return f"could not open PR: {(made.stderr or made.stdout).strip()[-300:]}"
+        return f"PR opened: {made.stdout.strip().splitlines()[-1]}"
+    except FileNotFoundError:
+        return "gh CLI not installed: pushed nothing, landed locally"
+    except Exception as exc:
+        return f"could not open PR: {exc}"
+
+
 def _feature_prompt(spec, feat: dict, retry_context: str) -> str:
     parts = [feat["spec"]]
     if spec.context:
@@ -250,6 +419,10 @@ def _feature_prompt(spec, feat: dict, retry_context: str) -> str:
             "Public surface this feature is planned to add or change: "
             + "; ".join(feat["contract"])
             + ". Anything else you export publicly gets flagged for review.")
+    if parse_expect(feat["spec"]):
+        parts.append("The `expect:` block above is not documentation — that "
+                     "command is executed after the acceptance check passes and "
+                     "every line under it must appear in its output.")
     if retry_context:
         parts.append("A previous attempt did not satisfy the acceptance check. "
                      f"Its output tail:\n{retry_context}\nFix the cause.")
@@ -303,10 +476,60 @@ def _probe_regression_signal(repo: str, base: str, timeout: int, goal_id: str) -
         pass
 
 
+def _mark_blocked(root, task_id: str, recs: list[dict],
+                  goal_id: str, feature_id: str = "") -> None:
+    """Put the escalation's reason on the task.
+
+    A board that shows `blocked` without saying why is a board you have to go
+    read a ledger to use, and the whole point of the column is to be the thing
+    that tells you what needs you.
+    """
+    if not task_id:
+        return
+    from . import tasks as _tasks
+    why = next((str(r.get("reason") or r.get("reason_class") or "escalated")
+                for r in reversed(recs)
+                if r.get("kind") == "escalation.raised"
+                and (not feature_id or r.get("feature_id") == feature_id)), "escalated")
+    try:
+        _tasks.update(root, task_id, state="blocked", error=why[:500])
+    except ValueError:
+        pass
+
+
 def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
-        candidates: int = 1) -> int:
-    """Walk the plan. Returns 0 (progressed or done) or 1 (escalated, paused)."""
+        candidates: int = 1, task_id: str = "") -> int:
+    """Run the next ready task, or the one named.
+
+    Tasks are sequential and gated, so the queue decides what starts: with
+    nothing named this takes `tasks.next_task()`, which is empty while anything
+    is in flight. A repo with no tasks at all still runs its own plan, which is
+    how projects that predate tasks keep working.
+
+    The walk is wrapped rather than edited because it exits on escalation from
+    seven different places; putting the state transition here means every one
+    of them lands on the board instead of the six I would have remembered.
+    """
     root = Path(root)
+    from . import tasks as _tasks
+    if not task_id and _tasks.read(root):
+        nxt = _tasks.next_task(root)
+        if nxt is None:
+            print("no task is ready: everything is blocked, in flight, or done")
+            return 0
+        task_id = nxt["id"]
+    if task_id:
+        _tasks.update(root, task_id, state="running", error="")
+        print(f"task {task_id}")
+    code = _walk(spec, root, runs_dir, candidates, task_id)
+    if code == 1 and task_id:
+        _mark_blocked(root, task_id, ledger.read(root), spec.goal_id)
+    return code
+
+
+def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
+    """Walk the plan feature by feature. 0 progressed or done, 1 escalated."""
+    from . import tasks as _tasks
     _lock_goal(root)
     repo = str(root)
     # reclaim any worktrees a previously killed run leaked (safe now: the lock we
@@ -316,15 +539,20 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
         prune_repo_worktrees(repo)
     except Exception:
         pass
-    plan = load_plan(root)
+    plan = load_plan(root, task_id)
     recs = ledger.read(root)
+    plan_id = str(plan[0].get("plan_id", "")) if plan else ""
+    if not any(r.get("kind") == "plan.approved"
+               and r.get("goal_id") == spec.goal_id
+               and r.get("plan_id") == plan_id for r in recs):
+        raise SystemExit("current plan is not approved; run `plexus approve` first")
 
     if not any(r["kind"] == "goal.started" for r in recs):
         ledger.record("goal.started", goal_id=spec.goal_id, root=root,
                       repo=repo, base_commit=_head(repo), spec_hash=spec.spec_hash)
     _probe_regression_signal(repo, _head(repo), spec.timeout, spec.goal_id)
 
-    for feat in plan:
+    for feat in execution_order(plan):
         fid = feat["id"]
         recs = ledger.read(root)
         state, next_attempt, budget_used = _feature_state(recs, spec.goal_id, fid)
@@ -333,13 +561,42 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
         if state == "escalated":
             return 1  # a human owns this one; do not run past it
 
+        # upstream gate: if this feature declares symbols from another repo that
+        # haven't landed yet, escalate instead of dispatching a run that can't
+        # succeed. The reason names the missing module so the operator (or the
+        # router) knows which sibling project's goal to activate first.
+        missing = _missing_upstream(feat.get("needs_upstream", []))
+        if missing:
+            # seed a goal in whichever sibling repo owns the missing symbol, so
+            # the upstream work is queued rather than left for the operator to
+            # remember. Best-effort: no registry entry -> the escalation stands
+            # alone. (See registry.py.)
+            try:
+                from .registry import seed_upstream
+                seeded = seed_upstream(missing, spec.goal_id)
+            except Exception:
+                seeded = []
+            tail = (" — seeded upstream goal(s): "
+                    + "; ".join(f"{s} in {r}" for s, r in seeded)) if seeded else \
+                   " — land it in the providing project first"
+            ledger.record("escalation.raised", goal_id=spec.goal_id, feature_id=fid,
+                          root=root, reason_class="upstream_not_ready",
+                          reason="depends on upstream not yet available: "
+                                 + ", ".join(missing) + tail,
+                          episode_ids=[])
+            return 1
+
         # per-goal episode ceiling — exhaustion escalates, never truncates scope
         episodes_used = sum(1 for r in recs if r["kind"] == "feature.started")
         if episodes_used >= spec.episodes_per_goal:
+            spend = _goal_spend(recs)
+            usd = spend.get("spend_usd")
             ledger.record("escalation.raised", goal_id=spec.goal_id, feature_id=fid,
                           root=root, reason_class="budget_exhausted",
-                          reason=f"goal hit {spec.episodes_per_goal}-episode ceiling",
-                          episode_ids=[])
+                          reason=f"goal hit {spec.episodes_per_goal}-episode ceiling"
+                                 f" — {spend['episodes_total']} episode(s)"
+                                 + (f", ${usd:.4f} spent" if usd is not None else ""),
+                          episode_ids=[], **spend)
             return 1
 
         # if a prior block was just answered, carry the answer into the next attempt
@@ -359,6 +616,9 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
                 prompt=_feature_prompt(spec, feat, retry_context),
                 public_verifiers=detect_verifiers(repo),  # heart: regression/correctness
                 timeout_seconds=spec.timeout,
+                skills=feat.get("skills", []),
+                difficulty=feat.get("difficulty", "unknown"),
+                effort=feat.get("effort", ""),
                 # heart owns the mechanism (outcome="blocked", reward withheld);
                 # plexus owns the vocabulary and what a block costs
                 blocked_marker=_BLOCKED_MARKER,
@@ -378,9 +638,7 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
                 # reviewer REJECT blocks the land (run.py already reads
                 # review_verdict below). Solo turn otherwise.
                 roles = DEFAULT_ROLES if spec.pipeline else None
-                cands = run_candidates(
-                    task, candidates, agent=spec.agent, agent_cmd=spec.agent_cmd,
-                    runs_dir=str(root / runs_dir), roles=roles)
+                cands = _build(spec, task, candidates, roles, root / runs_dir)
                 ep = best_episode(cands)
                 attempt_cost = _episode_cost(cands)  # best-of-N pays for all N
             finally:
@@ -389,6 +647,12 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
             ep_id = ep["episode_id"]
             last_episode_ids.append(ep_id)
             ep_outcome = ep["outcome"]
+            # Distil the sandbox's refusals now, while the episode's events are
+            # still in the journal. The journal rotates on a day scale and
+            # plexus reasons on a multi-week one, so a later scan would return
+            # less the older the question gets -- which looks exactly like the
+            # system having stopped making mistakes.
+            scope.observe(task_id, goal_id=spec.goal_id, feature_id=fid, root=root)
             review = ep.get("review_verdict")
             diff = (root / runs_dir / ep_id / "diff.patch").read_text()
 
@@ -426,17 +690,38 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
                 continue
 
             # plexus's own judgment, in its own worktree, never in heart's reward
-            acc_passed, acc_tail = _run_acceptance(
-                repo, base, diff, feat["acceptance"], spec.timeout)
+            acc_passed, acc_tail, acc_stage = _run_acceptance(
+                repo, base, diff, feat["acceptance"], spec.timeout,
+                parse_expect(feat["spec"]))
             ledger.record("acceptance.round", goal_id=spec.goal_id, feature_id=fid,
                           root=root, attempt=attempt, task_id=task_id,
                           episode_id=ep_id, passed=acc_passed,
-                          episode_outcome=ep_outcome, check=feat["acceptance"])
+                          episode_outcome=ep_outcome, check=feat["acceptance"],
+                          # `passed` stays the round's single verdict — the
+                          # expect block is part of plexus's acceptance, not a
+                          # second reward — and this names which half said no
+                          failed_stage=acc_stage or None)
 
             # land only when the criterion passes AND nothing regressed AND review ok.
             # `unverified` counts as "nothing regressed": there was no suite to
             # regress, and refusing to land would deadlock every test-less repo.
             if acc_passed and ep_outcome in ("pass", "unverified") and review != "reject":
+                # Software-factory boundary: a green feature whose risk class is
+                # on the goal's review-hold list waits for a human sign-off
+                # instead of auto-landing. Only on the first pass — a prior hold
+                # means it was resolved, so land it now (see _held_before).
+                from .review import classify
+                cls = classify(feat)
+                if cls in spec.review_hold and not _held_before(
+                        ledger.read(root), spec.goal_id, fid):
+                    ledger.record(
+                        "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
+                        root=root, reason_class="held_for_review",
+                        reason=f"{cls}-class feature passed acceptance; policy holds "
+                               f"'{cls}' for your sign-off before landing — resolve "
+                               f"to land, or amend the plan",
+                        episode_ids=[ep_id])
+                    return 1
                 # Scope gate, last thing before the commit exists. Not a retry:
                 # the agent and the plan disagree about how wide the feature is,
                 # and only a human can say which of the two is wrong.
@@ -461,6 +746,10 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
             # reads episode_outcome + acceptance_passed to place the phase
             if review == "reject":
                 fclass = "review_rejected"
+            elif acc_stage == "expect":
+                # the criterion passed and the suite is clean: the code works,
+                # it just isn't what the approved mockup showed
+                fclass = "expect_mismatch"
             elif not acc_passed:
                 fclass = "acceptance_failed"
             else:  # criterion passed but the existing suite regressed
@@ -469,8 +758,10 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
                           root=root, attempt=attempt, task_id=task_id,
                           episode_id=ep_id, failure_class=fclass,
                           episode_outcome=ep_outcome, acceptance_passed=acc_passed,
-                          reason=f"acceptance={'pass' if acc_passed else 'fail'} "
-                                 f"regression={'FAIL' if ep_outcome == 'fail' else 'ok'}",
+                          reason=("acceptance=pass but the expect block did not match"
+                                  if acc_stage == "expect" else
+                                  f"acceptance={'pass' if acc_passed else 'fail'}")
+                                 + f" regression={'FAIL' if ep_outcome == 'fail' else 'ok'}",
                           **attempt_cost)
             retry_context = acc_tail if not acc_passed else _verifier_tail(ep)
             attempt += 1
@@ -486,15 +777,38 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
     # scope gate: the full ground-truth suite on the built-up tree
     suite = subprocess.run(spec.suite, shell=True, cwd=repo,
                            capture_output=True, text=True)
+    final = ledger.read(root)
+    spend = _goal_spend(final)
     if suite.returncode == 0:
-        episodes = sum(1 for r in ledger.read(root) if r["kind"] == "feature.started")
+        if spec.manual_checks:
+            ledger.record("validation.automated_passed", goal_id=spec.goal_id,
+                          root=root, task=task_id,
+                          checks=list(spec.manual_checks), **spend)
+            if task_id:
+                _tasks.update(root, task_id, state="landed")
+            return 0
         ledger.record("goal.finished", goal_id=spec.goal_id, root=root,
-                      outcome="scope_satisfied", episodes_total=episodes)
+                      outcome="scope_satisfied", task=task_id, **spend)
+        note = _open_pr(spec, root, repo)
+        if note:
+            ledger.record("delivery.requested", goal_id=spec.goal_id, root=root,
+                          task=task_id, result=note)
+            print(note)
+        if task_id:
+            # the PR number, so validation can say which tasks a PR carries
+            found = re.search(r"/pull/(\d+)", note or "")
+            _tasks.update(root, task_id, state="landed",
+                          **({"pr": int(found.group(1))} if found else {}))
         return 0
     # ponytail: v0 escalates on regression; repair-feature synthesis is roadmap #2
+    usd = spend.get("spend_usd")
+    last_landed = [r.get("episode_id") for r in final
+                   if r["kind"] == "feature.landed" and r.get("episode_id")]
     ledger.record("escalation.raised", goal_id=spec.goal_id, root=root,
                   reason_class="regression",
-                  reason=f"scope suite failed after all features landed:\n"
-                         f"{(suite.stdout + suite.stderr)[-1000:]}",
-                  episode_ids=[])
+                  reason=f"scope suite failed after all {spend['episodes_total']} "
+                         f"episode(s) landed"
+                         + (f", ${usd:.4f} spent" if usd is not None else "")
+                         + f":\n{(suite.stdout + suite.stderr)[-1000:]}",
+                  episode_ids=last_landed[-1:], **spend)
     return 1

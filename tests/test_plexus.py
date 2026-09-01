@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 tmp = Path(tempfile.mkdtemp(prefix="plexus-test-"))
-os.environ["HEART_SPOOL_DIR"] = str(tmp / "spool")
+os.environ["EVENT_JOURNAL_DIR"] = str(tmp / "journal")
 
 here = Path(__file__).resolve()
 for p in (here.parents[1] / "src", here.parents[2] / "heart" / "src"):
@@ -28,12 +28,12 @@ recs = ledger.read(root)
 assert [r["kind"] for r in recs] == [
     "goal.started", "feature.started", "feature.failed", "feature.landed"]
 
-spool_files = list((tmp / "spool").glob("*.ndjson"))
-assert spool_files, "spine events not written"
-spool = [json.loads(l) for l in spool_files[0].read_text().splitlines()]
-assert all(e["source"] == "plexus" for e in spool)
-assert spool[1]["payload"]["goal_id"] == "g1"
-assert spool[1]["payload"]["feature_id"] == "f1"
+journal_files = list((tmp / "journal").glob("*.ndjson"))
+assert journal_files, "spine events not written"
+journal = [json.loads(l) for l in journal_files[0].read_text().splitlines()]
+assert all(e["source"] == "plexus" for e in journal)
+assert journal[1]["payload"]["goal_id"] == "g1"
+assert journal[1]["payload"]["feature_id"] == "f1"
 
 # --- task_id convention threads goal lineage through heart's events ---
 assert events.make_task_id("g1", "f1", 2) == "g1-f1-a2"
@@ -70,7 +70,7 @@ with open(ledger.ledger_path(root), "a") as f:
     f.write('{"ts": "2026-07-05T00:00:00+00:00", "kind": "goal.st')
 assert len(ledger.read(root)) == len(recs) + 3  # escalations + finish, junk skipped
 
-# --- stack rollup sees plexus on the shared spool ---
+# --- stack rollup sees plexus on the shared journal ---
 out = observe.stack(hours=1)
 assert any("plexus" in l for l in out), out
 
@@ -223,6 +223,23 @@ assert "mine.txt" in G("status", "--porcelain"), "unrelated edit was consumed"
 from plexus import plan as planmod  # noqa: E402
 from plexus.spec import GoalSpec  # noqa: E402
 
+# dependencies are hard ordering constraints; priority breaks ties only among
+# work whose prerequisites have landed
+unordered = [
+    {"id": "ui", "priority": 0, "depends_on": ["api"]},
+    {"id": "docs", "priority": 5, "depends_on": []},
+    {"id": "api", "priority": 2, "depends_on": []},
+]
+assert [f["id"] for f in planmod.execution_order(unordered)] == ["api", "ui", "docs"]
+try:
+    planmod.execution_order([
+        {"id": "a", "depends_on": ["b"]},
+        {"id": "b", "depends_on": ["a"]},
+    ])
+    raise AssertionError("dependency cycle should be rejected")
+except ValueError as exc:
+    assert "cycle" in str(exc)
+
 gspec = GoalSpec(goal_id="lg", text="t", context="", suite="true",
                  attempts_per_feature=3, episodes_per_goal=25, agent="shell",
                  agent_cmd=None, timeout=30, spec_hash="deadbeef")
@@ -289,7 +306,7 @@ from plexus.observe import _silent_layers  # noqa: E402
 # no episodes recorded yet -> nothing to judge, stay quiet
 assert _silent_layers([], ".") is None
 assert _silent_layers([{"kind": "goal.started", "goal_id": "g"}], ".") is None
-# episodes present but absent from the spool (aged out) is not evidence of a gap
+# episodes present but absent from the journal (aged out) is not evidence of a gap
 assert _silent_layers([{"kind": "acceptance.round", "episode_id": "no-such-episode"}],
                       ".") is None
 
@@ -427,6 +444,20 @@ ledger.record("feature.failed", goal_id="g", feature_id="f2", root=cr,
 ins = "\n".join(observe.insights(str(cr)))
 assert "cost: $0.2000" in ins and "180 in / 90 out" in ins, ins
 
+# --- _goal_spend: aggregate rollup for budget_exhausted/regression, distinct
+#     spend_* keys so the per-attempt cost summers never double-count it
+from plexus.run import _goal_spend  # noqa: E402
+gs = [{"kind": "feature.started"}, {"kind": "feature.started"},
+      {"kind": "feature.failed", "cost_usd": 0.05, "tokens_in": 40, "tokens_out": 20},
+      {"kind": "feature.landed", "cost_usd": 0.15, "tokens_in": 140, "tokens_out": 70}]
+assert _goal_spend(gs) == {"episodes_total": 2, "spend_usd": 0.2,
+                           "spend_tokens_in": 180, "spend_tokens_out": 90}, _goal_spend(gs)
+assert _goal_spend([{"kind": "feature.started"}]) == {"episodes_total": 1}  # unpriced
+# the rollup must NOT collide with cost_usd: insights on cr still reads $0.2000,
+# not doubled, because _goal_spend emits spend_usd (proven by the assert above +
+# that cr's records carry only per-attempt cost_usd, summed once here)
+assert "cost_usd" not in _goal_spend(gs), "rollup must avoid the cost_usd key"
+
 # --- amend: rewrites an unlanded feature's criterion, refuses a landed one ---
 from types import SimpleNamespace  # noqa: E402
 from plexus.plan import amend, load_plan, plan_path  # noqa: E402
@@ -463,5 +494,337 @@ from plexus import serve  # noqa: E402
 
 with contextlib.redirect_stdout(io.StringIO()):  # demo() prints "ok"; keep our line clean
     serve.demo()
+
+# --- #4 upstream gate: importable symbol passes, missing module/symbol reported
+from plexus.run import _missing_upstream  # noqa: E402
+
+assert _missing_upstream([]) == []
+assert _missing_upstream(["json", "json:loads"]) == []          # stdlib, present
+assert _missing_upstream(["json:nonesuch"]) == ["json:nonesuch"]  # module ok, symbol gone
+assert _missing_upstream(["no_such_module_xyz:Thing"]) == ["no_such_module_xyz:Thing"]
+
+# --- report digest: per-goal spend / lead-time / escalation rate + fleet total
+rr = tmp / "report-repo"; rr.mkdir()
+(rr / "plexus.toml").write_text('[goal]\nid="rg"\ntext="t"\n[ground_truth]\nsuite="true"\n')
+ledger.record("feature.started", goal_id="rg", feature_id="f1", root=rr)
+ledger.record("feature.landed", goal_id="rg", feature_id="f1", root=rr, cost_usd=0.30)
+ledger.record("feature.started", goal_id="rg", feature_id="f2", root=rr)
+ledger.record("escalation.raised", goal_id="rg", feature_id="f2", root=rr,
+              reason_class="attempts_exhausted", reason="x")
+m = observe._metrics(ledger.read(rr), "rg")
+assert m["spend"] == 0.30 and m["landed"] == 1, m
+assert m["touched"] == 2 and m["esc_raised"] == 1 and m["esc_rate"] == 0.5, m
+rep = "\n".join(observe.report([rr]))
+assert "rg" in rep and "$  0.3000" in rep and "fleet: $0.3000" in rep, rep
+assert observe.report([tmp / "nonexistent"]) == ["no goals recorded"]
+
+# --- registry: prefix resolution + idempotent cross-repo seeding
+from plexus import registry  # noqa: E402
+import contextlib as _c, io as _io  # noqa: E402
+with _c.redirect_stdout(_io.StringIO()):
+    registry.demo()
+
+# seed writes a plannable goal into the owning repo, then load_spec reads it back
+from plexus.spec import load_spec  # noqa: E402
+up = tmp / "up-repo"; up.mkdir()
+seeded = registry.seed_upstream(["heart.x:Y"], "g-down", {"heart": str(up)})
+assert seeded == [("heart.x:Y", str(up))], seeded
+assert load_spec(up).goal_id == "upstream-y"       # scaffolded spec is valid
+assert registry.seed_upstream(["heart.x:Y"], "g-down", {"heart": str(up)}) == []  # idempotent
+
+# --- review hold-gate: held classes escalate before landing, then land once resolved
+from plexus.run import _held_before  # noqa: E402
+hr = tmp / "hold-repo"; (hr / ".plexus").mkdir(parents=True)
+assert not _held_before([], "g", "f1")
+ledger.record("escalation.raised", goal_id="g", feature_id="f1", root=hr,
+              reason_class="held_for_review", reason="sign off")
+assert _held_before(ledger.read(hr), "g", "f1")   # a prior hold means it was resolved -> land
+# the two classes that can break something no test covers hold by default — a
+# spec that says nothing must not mean "land the ledger schema unread"
+assert load_spec(rr).review_hold == ("spine", "boundary")
+assert load_spec(rr).pr_base == "main"
+# and an explicit empty list still opts out
+(rr / "plexus.toml").write_text((rr / "plexus.toml").read_text()
+                                + '\n[review]\nhold = []\npr_base = ""\n')
+assert load_spec(rr).review_hold == () and load_spec(rr).pr_base == ""
+
+# --- resolve guard: a wrong feature id must not silently no-op (shakeout finding)
+from plexus import cli  # noqa: E402
+rg = tmp / "resolve-repo"; rg.mkdir()
+(rg / "plexus.toml").write_text('[goal]\nid="rgoal"\ntext="t"\n[ground_truth]\nsuite="true"\n')
+ledger.record("escalation.raised", goal_id="rgoal", feature_id="realf", root=rg,
+              reason_class="attempts_exhausted", reason="x")
+assert cli.main(["resolve", "wrongf", "--root", str(rg)]) == 1      # typo -> refused
+assert not any(r["kind"] == "escalation.resolved" for r in ledger.read(rg))
+assert cli.main(["resolve", "realf", "ok", "--root", str(rg)]) == 0  # correct -> resolved
+assert any(r["kind"] == "escalation.resolved" and r["feature_id"] == "realf"
+           for r in ledger.read(rg))
+
+# --- cache tokens: priced, never folded into tokens_in ---------------------
+# A cached agent turn reports almost no `tokens_in` while sending tens of
+# thousands of cached tokens. Counting only tokens_in understated every turn;
+# adding cache into it would overcharge reads tenfold. Both are wrong, so the
+# buckets stay separate all the way from heart's event to the dashboard.
+from heart.runner import CACHE_MULTIPLIERS  # noqa: E402
+from plexus.run import _episode_cost  # noqa: E402
+
+eps = [{"usage": {"cost_usd": 0.10, "tokens_in": 15, "tokens_out": 2692,
+                  "cache_read": 48_000, "cache_write_5m": 9_000, "cache_write_1h": 3_000}},
+       {"usage": {"cost_usd": 0.05, "tokens_in": 10, "tokens_out": 100,
+                  "cache_read": 1_000, "cache_write_5m": 0, "cache_write_1h": 0}}]
+agg = _episode_cost(eps)
+assert agg["cache_read"] == 49_000 and agg["cache_write_5m"] == 9_000, agg
+assert agg["cache_write_1h"] == 3_000 and agg["tokens_in"] == 25, agg
+assert agg["cost_usd"] == 0.15, agg
+# an episode heart could not price contributes nothing rather than a zero
+assert "cache_read" not in _episode_cost([{"usage": {}}])
+
+# end to end through the dashboard: a synthetic journal, real arithmetic
+import shutil  # noqa: E402
+journal = tmp / "cache-journal"; journal.mkdir()
+prior_journal = os.environ["EVENT_JOURNAL_DIR"]
+os.environ["EVENT_JOURNAL_DIR"] = str(journal)
+try:
+    croot = tmp / "cache-repo"; croot.mkdir()
+    (croot / "plexus.toml").write_text(
+        '[goal]\nid="cg"\ntext="t"\n[ground_truth]\nsuite="true"\n')
+    import datetime as _dt  # noqa: E402
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    (journal / "20260731.ndjson").write_text(json.dumps({
+        "ts": now, "source": "heart", "kind": "role.finished",
+        "payload": {"agent": "claude", "cli": "claude", "repo": str(croot),
+                    "tokens_in": 1_000_000, "tokens_out": 0,
+                    "cache_read": 1_000_000, "cache_write_5m": 1_000_000,
+                    "cache_write_1h": 1_000_000}}) + "\n")
+    from plexus import registry, serve  # noqa: E402
+    old_ws = os.environ.get("PLEXUS_WORKSPACE")
+    os.environ["PLEXUS_WORKSPACE"] = str(tmp / "ws.json")
+    # 1M uncached @ $5 + 1M read @ 0.1x + 1M 5m write @ 1.25x + 1M 1h write @ 2x
+    want = 5.0 + 0.5 + 6.25 + 10.0
+    try:
+        registry.set_accounting_config(
+            {"claude": 0, "codex": 0},
+            {"claude": {"input": 5.0, "output": 25.0}})
+        cost = serve._dashboard([croot], 24)["cost"]
+
+        # --- no double count: heart emits BOTH the per-role event and an
+        #     episode.finished carrying the sum of those roles. Every consumer
+        #     must price role.finished only; adding the aggregate doubles the
+        #     bill, and the failure is invisible because the result is still a
+        #     plausible number. Append the aggregate and assert nothing moves.
+        #
+        # Inside the try, because the prices this asserts against live in the
+        # workspace PLEXUS_WORKSPACE points at. Outside it, the lookup fell back
+        # to ~/.config/plexus/workspace.json -- so the assertion passed on a
+        # developer machine that happened to have one and read 0.0 on a fresh
+        # CI runner, which is the least useful place to learn it.
+        with open(journal / "20260731.ndjson", "a") as fh:
+            fh.write(json.dumps({
+                "ts": now, "source": "heart", "kind": "episode.finished",
+                "payload": {"agent": "claude", "cli": "claude", "repo": str(croot),
+                            "outcome": "pass",
+                            "tokens_in": 1_000_000, "tokens_out": 0,
+                            "cache_read": 1_000_000, "cache_write_5m": 1_000_000,
+                            "cache_write_1h": 1_000_000, "cost_usd": want}}) + "\n")
+        again = serve._dashboard([croot], 24)["cost"]
+        # the same trap in the factory-wide rollup
+        stack = "\n".join(observe.stack(hours=24))
+
+        # --- an interactive CLI turn is priced too. arteries emits
+        #     turn.observed and heart emits role.finished for disjoint work, so
+        #     both count; this is ~all of a subscription seat's real workload
+        #     and used to price at 0.
+        with open(journal / "20260731.ndjson", "a") as fh:
+            fh.write(json.dumps({
+                "ts": now, "source": "arteries", "kind": "turn.observed",
+                "turn_id": "t1",
+                "payload": {"cli": "claude", "repo": str(croot),
+                            "tokens_in": 1_000_000, "tokens_out": 0,
+                            "cache_read": 1_000_000, "cache_write_5m": 1_000_000,
+                            "cache_write_1h": 1_000_000}}) + "\n")
+        withturn = serve._dashboard([croot], 24)["cost"]
+    finally:
+        os.environ.pop("PLEXUS_WORKSPACE", None) if old_ws is None \
+            else os.environ.__setitem__("PLEXUS_WORKSPACE", old_ws)
+    assert abs(cost["equivalent_api"] - want) < 1e-6, (cost["equivalent_api"], want)
+    assert cost["cache_tokens"] == 3_000_000, cost["cache_tokens"]
+    assert cost["tokens_in"] == 1_000_000, "cache must not inflate tokens_in"
+    assert abs(again["equivalent_api"] - want) < 1e-6, \
+        f"episode.finished double-counted: {again['equivalent_api']} != {want}"
+    assert again["cache_tokens"] == 3_000_000, again["cache_tokens"]
+    assert again["tokens_in"] == 1_000_000, again["tokens_in"]
+    assert "2 priced role-turn(s)" not in stack, stack
+    assert abs(withturn["equivalent_api"] - 2 * want) < 1e-6, \
+        f"interactive turn not priced: {withturn['equivalent_api']} != {2 * want}"
+    assert withturn["cache_tokens"] == 6_000_000, withturn["cache_tokens"]
+
+    # --- a turn is billed against its model, not just its vendor. Opus and
+    #     Haiku on one CLI differ by more than 10x, so one rate per provider
+    #     misprices whichever you use less. arteries reports `model`; a rate
+    #     card row for it must win over the provider rate.
+    with open(journal / "20260731.ndjson", "a") as fh:
+        fh.write(json.dumps({
+            "ts": now, "source": "arteries", "kind": "turn.observed",
+            "turn_id": "t2",
+            "payload": {"cli": "claude", "repo": str(croot),
+                        "model": "claude-haiku-4-5",
+                        "tokens_in": 1_000_000, "tokens_out": 0}}) + "\n")
+    old_ws = os.environ.get("PLEXUS_WORKSPACE")
+    old_xdg = os.environ.get("XDG_CONFIG_HOME")
+    os.environ["PLEXUS_WORKSPACE"] = str(tmp / "ws.json")
+    # heart's rate card is read from $XDG_CONFIG_HOME/heart/models.json. Point
+    # it at a fixture: without this the assertions below pass or fail according
+    # to what the developer running the suite happens to have configured.
+    os.environ["XDG_CONFIG_HOME"] = str(tmp / "cfg")
+    (tmp / "cfg" / "heart").mkdir(parents=True, exist_ok=True)
+    (tmp / "cfg" / "heart" / "models.json").write_text(json.dumps({
+        "profiles": {"haiku": {"model": "claude-haiku-4-5"}},
+        "pricing": {"claude:haiku": {"in_per_mtok": 1.0, "out_per_mtok": 5.0}},
+    }))
+    try:
+        # heart owns the verified card; plexus bills from it rather than
+        # keeping a second copy, so a provider-only workspace config still
+        # prices Haiku at the Haiku rate.
+        registry.set_accounting_config(
+            {"claude": 0, "codex": 0},
+            {"claude": {"input": 5.0, "output": 25.0}})
+        bymodel = serve._dashboard([croot], 24)["cost"]
+        assert abs(bymodel["equivalent_api"] - (2 * want + 1.0)) < 1e-6, \
+            f"heart model rate ignored: {bymodel['equivalent_api']}"
+        assert bymodel["models"]["claude"]["claude-haiku-4-5"] == 1, bymodel["models"]
+
+        # a workspace override outranks heart's card — a negotiated rate has to
+        # beat the published one
+        registry.set_accounting_config(
+            {"claude": 0, "codex": 0},
+            {"claude": {"input": 5.0, "output": 25.0,
+                        "models": {"claude-haiku-4-5": {"input": 4.0, "output": 20.0}}}})
+        override = serve._dashboard([croot], 24)["cost"]
+        assert abs(override["equivalent_api"] - (2 * want + 4.0)) < 1e-6, \
+            f"workspace override ignored: {override['equivalent_api']}"
+
+        # a model in neither card still bills, at the provider rate: adding one
+        # model's rate must not silently stop the others being counted
+        (tmp / "cfg" / "heart" / "models.json").write_text(json.dumps({
+            "profiles": {}, "pricing": {}}))
+        registry.set_accounting_config(
+            {"claude": 0, "codex": 0},
+            {"claude": {"input": 5.0, "output": 25.0}})
+        fallback = serve._dashboard([croot], 24)["cost"]
+        assert abs(fallback["equivalent_api"] - (2 * want + 5.0)) < 1e-6, \
+            f"provider fallback broken: {fallback['equivalent_api']}"
+    finally:
+        for key, prior in (("PLEXUS_WORKSPACE", old_ws), ("XDG_CONFIG_HOME", old_xdg)):
+            os.environ.pop(key, None) if prior is None \
+                else os.environ.__setitem__(key, prior)
+
+    # --- fast mode bills at 2x across the whole window, cache included. The
+    #     multiplier scales the rates before the cache buckets are worked out,
+    #     because the vendor stacks caching on top of fast-mode pricing; naively
+    #     doubling the final total gets the same answer only when there is no
+    #     cache traffic, which is never true of a real agent turn.
+    with open(journal / "20260731.ndjson", "a") as fh:
+        fh.write(json.dumps({
+            "ts": now, "source": "arteries", "kind": "turn.observed",
+            "turn_id": "tfast",
+            "payload": {"cli": "claude", "repo": str(croot),
+                        "speed": "fast",
+                        "tokens_in": 1_000_000, "tokens_out": 1_000_000,
+                        "cache_read": 1_000_000}}) + "\n")
+    old_ws = os.environ.get("PLEXUS_WORKSPACE")
+    old_xdg = os.environ.get("XDG_CONFIG_HOME")
+    os.environ["PLEXUS_WORKSPACE"] = str(tmp / "ws.json")
+    # empty card again, so every turn in the window prices off the provider
+    # rate and the only variable under test is the speed multiplier
+    os.environ["XDG_CONFIG_HOME"] = str(tmp / "cfg")
+    try:
+        registry.set_accounting_config(
+            {"claude": 0, "codex": 0},
+            {"claude": {"input": 5.0, "output": 25.0}})
+        fast = serve._dashboard([croot], 24)["cost"]
+        # the earlier Haiku turn now bills at the $5 provider rate, plus
+        # 1M in @ $10 + 1M out @ $50 + 1M cache read @ 0.1 x $10 = $61
+        assert abs(fast["equivalent_api"] - (2 * want + 5.0 + 61.0)) < 1e-6, \
+            f"fast mode not billed at 2x: {fast['equivalent_api']}"
+        assert fast["premium_speed"] == {"fast": 1}, fast["premium_speed"]
+    finally:
+        for key, prior in (("PLEXUS_WORKSPACE", old_ws), ("XDG_CONFIG_HOME", old_xdg)):
+            os.environ.pop(key, None) if prior is None \
+                else os.environ.__setitem__(key, prior)
+
+    # --- turns money could not be attached to are counted, not dropped. Both
+    #     of these used to fall off the pricing chain leaving no trace, so a
+    #     provider with no adapter read as free rather than as unmeasured.
+    with open(journal / "20260731.ndjson", "a") as fh:
+        fh.write(json.dumps({
+            "ts": now, "source": "arteries", "kind": "turn.observed",
+            "payload": {"repo": str(croot), "usage_source": "unavailable"}}) + "\n")
+        fh.write(json.dumps({
+            "ts": now, "source": "arteries", "kind": "turn.observed",
+            "payload": {"repo": str(croot), "tokens_in": 999}}) + "\n")
+    gaps = serve._dashboard([croot], 24)["cost"]["gaps"]
+    assert gaps.get("unmeasured") == 1, gaps
+    assert gaps.get("unattributed") == 1, gaps
+
+    # utilisation: a ratio only when both halves are real. Seat detection reads
+    # the signed-in CLI plans out of $HOME, so point HOME at an empty dir —
+    # otherwise this assertion passes or fails according to whose machine runs
+    # the suite.
+    real_home = os.environ.get("HOME")
+    os.environ["HOME"] = str(tmp / "empty-home")
+    try:
+        nc = serve._dashboard([croot], 24)["cost"]
+        assert nc["subscription"] == 0.0, nc["subscription"]
+        assert nc["seat_utilisation"] is None, \
+            "no seat cost -> None, never a 0% that reads as waste"
+    finally:
+        os.environ.pop("HOME", None) if real_home is None \
+            else os.environ.__setitem__("HOME", real_home)
+
+    # --- the time window actually filters. A turn three days old must be
+    #     invisible at 1h, visible at 7d, and visible at all time (window 0).
+    #     The failure this pins is a metric that silently keeps its own 24h
+    #     cutoff while the picker says something else.
+    old_ts = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=3)).isoformat()
+    with open(journal / "20260731.ndjson", "a") as fh:
+        fh.write(json.dumps({
+            "ts": old_ts, "source": "arteries", "kind": "turn.observed",
+            "turn_id": "old1",
+            "payload": {"cli": "claude", "repo": str(croot),
+                        "tokens_in": 2_000_000, "tokens_out": 0}}) + "\n")
+    # a real seat price, or the accrual assertions below compare 0.0 to 0.0
+    old_ws = os.environ.get("PLEXUS_WORKSPACE")
+    os.environ["PLEXUS_WORKSPACE"] = str(tmp / "ws.json")
+    try:
+        registry.set_accounting_config(
+            {"claude": 200, "codex": 0},
+            {"claude": {"input": 5.0, "output": 25.0}})
+        hour = serve._dashboard([croot], 1)
+        week = serve._dashboard([croot], 24 * 7)
+        year = serve._dashboard([croot], 24 * 365)
+        forever = serve._dashboard([croot], 0)
+    finally:
+        os.environ.pop("PLEXUS_WORKSPACE", None) if old_ws is None \
+            else os.environ.__setitem__("PLEXUS_WORKSPACE", old_ws)
+    assert forever["cost"]["subscription"] > 0, "seat price not applied"
+    assert week["cost"]["tokens_in"] - hour["cost"]["tokens_in"] == 2_000_000, \
+        (hour["cost"]["tokens_in"], week["cost"]["tokens_in"])
+    assert week["activity"]["turns"] > hour["activity"]["turns"], "turn counts ignore the window"
+    assert forever["cost"]["tokens_in"] == week["cost"]["tokens_in"], "all time must not drop events"
+    # Seat accrual caps at the span of observed history. Without the cap a
+    # one-year window prorated twelve months of subscription over three days of
+    # data and reported it as spend — plausible-looking and entirely invented.
+    # not exact equality: each call measures elapsed history from its own
+    # now(), so the two land microseconds apart and can straddle the rounding
+    # step. A cent of tolerance still catches the regression this pins, which
+    # was a year window accruing $2400 against three days of data.
+    assert abs(year["cost"]["subscription"]
+               - forever["cost"]["subscription"]) < 0.01, \
+        ("a window longer than the data must not accrue seat cost past it",
+         year["cost"]["subscription"], forever["cost"]["subscription"])
+    assert forever["cost"]["subscription"] < 24 * 30, forever["cost"]["subscription"]
+    assert "all time" in "\n".join(observe.stack(hours=0))
+finally:
+    os.environ["EVENT_JOURNAL_DIR"] = prior_journal
 
 print("plexus self-check ok")

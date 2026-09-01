@@ -42,6 +42,11 @@ _PHASE: dict[str, str] = {
     "review_rejected": "coding",
     "verify_failed": "testing",
     "acceptance_failed": "testing",
+    # the criterion passed and nothing regressed: the code works and does not
+    # look like the mockup that was signed off, which makes the criterion — not
+    # the code — the thing that was wrong. Same cell as acceptance-fail/no-
+    # regression, reached from the other side.
+    "expect_mismatch": "intent",
 }
 
 # escalation reason_class -> phase, for the goal/plan-level failures that never
