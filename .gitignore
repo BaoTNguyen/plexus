@@ -18,3 +18,4 @@ runs/
 frontend/node_modules/
 frontend/.vite/
 frontend/*.tsbuildinfo
+.codex/config.toml
