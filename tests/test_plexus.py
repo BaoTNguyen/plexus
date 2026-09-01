@@ -599,54 +599,61 @@ try:
     from plexus import registry, serve  # noqa: E402
     old_ws = os.environ.get("PLEXUS_WORKSPACE")
     os.environ["PLEXUS_WORKSPACE"] = str(tmp / "ws.json")
+    # 1M uncached @ $5 + 1M read @ 0.1x + 1M 5m write @ 1.25x + 1M 1h write @ 2x
+    want = 5.0 + 0.5 + 6.25 + 10.0
     try:
         registry.set_accounting_config(
             {"claude": 0, "codex": 0},
             {"claude": {"input": 5.0, "output": 25.0}})
         cost = serve._dashboard([croot], 24)["cost"]
+
+        # --- no double count: heart emits BOTH the per-role event and an
+        #     episode.finished carrying the sum of those roles. Every consumer
+        #     must price role.finished only; adding the aggregate doubles the
+        #     bill, and the failure is invisible because the result is still a
+        #     plausible number. Append the aggregate and assert nothing moves.
+        #
+        # Inside the try, because the prices this asserts against live in the
+        # workspace PLEXUS_WORKSPACE points at. Outside it, the lookup fell back
+        # to ~/.config/plexus/workspace.json -- so the assertion passed on a
+        # developer machine that happened to have one and read 0.0 on a fresh
+        # CI runner, which is the least useful place to learn it.
+        with open(journal / "20260731.ndjson", "a") as fh:
+            fh.write(json.dumps({
+                "ts": now, "source": "heart", "kind": "episode.finished",
+                "payload": {"agent": "claude", "cli": "claude", "repo": str(croot),
+                            "outcome": "pass",
+                            "tokens_in": 1_000_000, "tokens_out": 0,
+                            "cache_read": 1_000_000, "cache_write_5m": 1_000_000,
+                            "cache_write_1h": 1_000_000, "cost_usd": want}}) + "\n")
+        again = serve._dashboard([croot], 24)["cost"]
+        # the same trap in the factory-wide rollup
+        stack = "\n".join(observe.stack(hours=24))
+
+        # --- an interactive CLI turn is priced too. arteries emits
+        #     turn.observed and heart emits role.finished for disjoint work, so
+        #     both count; this is ~all of a subscription seat's real workload
+        #     and used to price at 0.
+        with open(journal / "20260731.ndjson", "a") as fh:
+            fh.write(json.dumps({
+                "ts": now, "source": "arteries", "kind": "turn.observed",
+                "turn_id": "t1",
+                "payload": {"cli": "claude", "repo": str(croot),
+                            "tokens_in": 1_000_000, "tokens_out": 0,
+                            "cache_read": 1_000_000, "cache_write_5m": 1_000_000,
+                            "cache_write_1h": 1_000_000}}) + "\n")
+        withturn = serve._dashboard([croot], 24)["cost"]
     finally:
         os.environ.pop("PLEXUS_WORKSPACE", None) if old_ws is None \
             else os.environ.__setitem__("PLEXUS_WORKSPACE", old_ws)
-    # 1M uncached @ $5 + 1M read @ 0.1x + 1M 5m write @ 1.25x + 1M 1h write @ 2x
-    want = 5.0 + 0.5 + 6.25 + 10.0
     assert abs(cost["equivalent_api"] - want) < 1e-6, (cost["equivalent_api"], want)
     assert cost["cache_tokens"] == 3_000_000, cost["cache_tokens"]
     assert cost["tokens_in"] == 1_000_000, "cache must not inflate tokens_in"
-
-    # --- no double count: heart emits BOTH the per-role event and an
-    #     episode.finished carrying the sum of those roles. Every consumer must
-    #     price role.finished only; adding the aggregate doubles the bill, and
-    #     the failure is invisible because the result is still a plausible
-    #     number. Append the aggregate and assert nothing moves.
-    with open(journal / "20260731.ndjson", "a") as fh:
-        fh.write(json.dumps({
-            "ts": now, "source": "heart", "kind": "episode.finished",
-            "payload": {"agent": "claude", "cli": "claude", "repo": str(croot),
-                        "outcome": "pass",
-                        "tokens_in": 1_000_000, "tokens_out": 0,
-                        "cache_read": 1_000_000, "cache_write_5m": 1_000_000,
-                        "cache_write_1h": 1_000_000, "cost_usd": want}}) + "\n")
-    again = serve._dashboard([croot], 24)["cost"]
     assert abs(again["equivalent_api"] - want) < 1e-6, \
         f"episode.finished double-counted: {again['equivalent_api']} != {want}"
     assert again["cache_tokens"] == 3_000_000, again["cache_tokens"]
     assert again["tokens_in"] == 1_000_000, again["tokens_in"]
-    # the same trap in the factory-wide rollup
-    stack = "\n".join(observe.stack(hours=24))
     assert "2 priced role-turn(s)" not in stack, stack
-
-    # --- an interactive CLI turn is priced too. arteries emits turn.observed
-    #     and heart emits role.finished for disjoint work, so both count; this
-    #     is ~all of a subscription seat's real workload and used to price at 0.
-    with open(journal / "20260731.ndjson", "a") as fh:
-        fh.write(json.dumps({
-            "ts": now, "source": "arteries", "kind": "turn.observed",
-            "turn_id": "t1",
-            "payload": {"cli": "claude", "repo": str(croot),
-                        "tokens_in": 1_000_000, "tokens_out": 0,
-                        "cache_read": 1_000_000, "cache_write_5m": 1_000_000,
-                        "cache_write_1h": 1_000_000}}) + "\n")
-    withturn = serve._dashboard([croot], 24)["cost"]
     assert abs(withturn["equivalent_api"] - 2 * want) < 1e-6, \
         f"interactive turn not priced: {withturn['equivalent_api']} != {2 * want}"
     assert withturn["cache_tokens"] == 6_000_000, withturn["cache_tokens"]
