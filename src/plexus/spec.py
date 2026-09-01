@@ -41,6 +41,12 @@ timeout = 300
 # cmd = "..."     # custom agent template, prompt in $HEART_PROMPT (overrides name)
 # pipeline = true # build each feature with heart's implement/test/review roles
 #                 # instead of one solo turn; a reviewer REJECT blocks the land
+# orchestrate = true
+#                 # let heart split each feature into a dependency graph of
+#                 # workers built in waves and merged with git, falling back to a
+#                 # single build when the feature will not split. Costs one extra
+#                 # planning call per feature; earns it back when features are
+#                 # large enough to have independent parts.
 
 [review]
 hold = ["spine", "boundary"]
@@ -66,6 +72,13 @@ class GoalSpec:
     timeout: int
     spec_hash: str
     pipeline: bool = False  # implement/test/review roles instead of a solo turn
+    # Let heart decompose each feature into a dependency graph of workers (its
+    # Path B) instead of building it in one worktree. The two DAGs are separate
+    # scales of the same idea and both stay: plexus orders the features of a
+    # goal and walks them one at a time, and heart may order the subtasks
+    # *within* whichever feature it was handed. A serial feature plan is not a
+    # reason for serial subtasks.
+    orchestrate: bool = False
     # Risk classes that wait for a human sign-off before landing even when
     # acceptance is green. On by default for the two classes that can break
     # something no test covers: an unattended factory whose riskiest commits
@@ -98,6 +111,7 @@ def load_spec(root: str | Path = ".") -> GoalSpec:
         agent=agent.get("name", "claude"),
         agent_cmd=agent.get("cmd"),
         pipeline=bool(agent.get("pipeline", False)),
+        orchestrate=bool(agent.get("orchestrate", False)),
         timeout=int(agent.get("timeout", 300)),
         spec_hash=hashlib.sha256(raw).hexdigest()[:12],
         review_hold=tuple(review.get("hold", ("spine", "boundary"))),

@@ -27,6 +27,7 @@ from pathlib import Path
 from heart.detect import detect_verifiers
 from heart.env import Workspace
 from heart.episode import DEFAULT_ROLES, best_episode, run_candidates
+from heart.orchestrate import run_orchestrated
 from heart.taskspec import TaskSpec
 
 from . import events, ledger, scope
@@ -92,6 +93,31 @@ def _lock_goal(root: Path) -> None:
     f.write(str(os.getpid()))
     f.flush()
     _LOCKS[key] = f
+
+
+def _build(spec, task, candidates: int, roles, runs_dir) -> list[dict]:
+    """One attempt at a feature: N candidate episodes, best-of picked by caller.
+
+    `orchestrate` hands the feature to heart's Path B, which may split it into a
+    dependency graph of workers built in waves and merged with git — and falls
+    back to a single build on its own when the feature will not split, when the
+    repo has no verifier, or when the plan is invalid. Plexus does not second-
+    guess any of that: it decides *what* to build, heart decides *how*.
+
+    The two orderings are different scales and neither replaces the other. This
+    loop is still strictly serial in features, because plexus walks its own DAG
+    one node at a time and the next feature builds on the last one's landed
+    commit. What changes is that a single feature is no longer forced to be one
+    sequential agent.
+
+    # ponytail: orchestrated candidates run one after another rather than in
+    # parallel like run_candidates does. N is 1 in every default config, and N
+    # concurrent decompositions is N * waves agents against one rate limit.
+    """
+    kwargs = dict(agent=spec.agent, agent_cmd=spec.agent_cmd, runs_dir=str(runs_dir))
+    if not spec.orchestrate:
+        return run_candidates(task, candidates, roles=roles, **kwargs)
+    return [run_orchestrated(task, roles=roles, **kwargs) for _ in range(max(1, candidates))]
 
 
 def _episode_cost(episodes: list[dict]) -> dict:
@@ -612,9 +638,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 # reviewer REJECT blocks the land (run.py already reads
                 # review_verdict below). Solo turn otherwise.
                 roles = DEFAULT_ROLES if spec.pipeline else None
-                cands = run_candidates(
-                    task, candidates, agent=spec.agent, agent_cmd=spec.agent_cmd,
-                    runs_dir=str(root / runs_dir), roles=roles)
+                cands = _build(spec, task, candidates, roles, root / runs_dir)
                 ep = best_episode(cands)
                 attempt_cost = _episode_cost(cands)  # best-of-N pays for all N
             finally:
