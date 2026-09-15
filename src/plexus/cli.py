@@ -25,6 +25,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--waive", action="store_true",
                    help="approve despite criteria that don't fail on the base commit")
 
+    s = sub.add_parser("doctor", help="sandbox readiness for this box; --fix provisions it")
+    s.add_argument("--fix", action="store_true",
+                   help="create the internal network, (re)start the egress proxy "
+                        "with the allowlist this box needs, and reap dead "
+                        "containers and worktrees")
+
     s = sub.add_parser("run", help="walk the approved plan; exit 0 progressed/done, 1 escalated")
     s.add_argument("--root", default=".")
     s.add_argument("--candidates", type=int, default=1, help="best-of-N per attempt")
@@ -123,6 +129,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="cap on ALL agents across goals, stamped into each run")
 
     args = p.parse_args(argv)
+    # Credentials are fleet policy, so they are decided once, here, rather than
+    # in whichever shell happened to launch a run. Every subcommand and every
+    # child inherits the same answer -- `plexus serve` spawns `python -m
+    # plexus.cli`, so the dashboard path comes through this line too.
+    from .registry import seat_env
+    os.environ.update(seat_env())
     if args.cmd == "init":
         from .spec import init, install_integration
         path = init(args.root)
@@ -146,9 +158,22 @@ def main(argv: list[str] | None = None) -> int:
         from .spec import load_spec
         print(f"approved {approve(load_spec(args.root), args.root, waive=args.waive, task_id=args.task)}")
         return 0
+    if args.cmd == "doctor":
+        from .sandbox import doctor
+        for line in doctor(fix=args.fix):
+            print(line)
+        return 0
     if args.cmd == "run":
         from .run import run
+        from .sandbox import ensure
         from .spec import load_spec
+        # Before the wave, not per episode. Every goal in this run assumes the
+        # same network, the same proxy and the same image; discovering that any
+        # of them is missing costs one failed episode per goal otherwise, each
+        # taking its full timeout to say so.
+        if os.environ.get("HEART_SANDBOX", "off") not in ("off", ""):
+            for line in ensure():
+                print(f"sandbox: {line}")
         return run(load_spec(args.root), args.root, candidates=args.candidates,
                    task_id=args.task)
     if args.cmd == "amend":
