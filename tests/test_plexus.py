@@ -828,3 +828,142 @@ finally:
     os.environ["EVENT_JOURNAL_DIR"] = prior_journal
 
 print("plexus self-check ok")
+
+
+def test_the_seat_is_named_by_paths_and_never_read(monkeypatch, tmp_path):
+    """Plexus decides whether a run gets a seat; heart decides how it mounts.
+    The token stays a path -- a control plane that reads it puts the bytes in
+    episode.json, `ps` and the run artifacts."""
+    from plexus import registry
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    cred = home / ".claude" / ".credentials.json"
+    cred.write_text('{"claudeAiOauth": {"subscriptionType": "max"}}')
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("HEART_SANDBOX_HOME_FILES", raising=False)
+    monkeypatch.delenv("PLEXUS_SEAT", raising=False)
+
+    env = registry.seat_env()
+    assert env["HEART_SANDBOX_HOME_FILES"] == str(cred)
+    # the whole point: what plexus hands down is a path, not a token
+    assert "subscriptionType" not in str(env)
+
+
+def test_a_seat_that_is_not_signed_in_contributes_nothing(monkeypatch, tmp_path):
+    from plexus import registry
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("HEART_SANDBOX_HOME_FILES", raising=False)
+    monkeypatch.delenv("PLEXUS_SEAT", raising=False)
+    assert registry.seat_env() == {}
+
+
+def test_a_run_can_be_denied_every_seat(monkeypatch, tmp_path):
+    from plexus import registry
+
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "auth.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("HEART_SANDBOX_HOME_FILES", raising=False)
+    monkeypatch.setenv("PLEXUS_SEAT", "off")
+    assert registry.seat_env() == {}
+
+
+def test_an_operator_who_named_files_is_left_alone(monkeypatch, tmp_path):
+    """Detection is the default, never an override -- same rule the seat *cost*
+    already follows in accounting_config."""
+    from plexus import registry
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / ".credentials.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("PLEXUS_SEAT", raising=False)
+    monkeypatch.setenv("HEART_SANDBOX_HOME_FILES", "/only/this.json")
+    assert registry.seat_env() == {}
+
+
+def test_the_allowlist_is_no_wider_than_the_box_can_use(monkeypatch, tmp_path):
+    """Composed from what exists: the local model ports in models.json plus the
+    vendor hosts for seats that are signed in. A provider with no seat
+    contributes no host -- an allowlist wider than the credentials that could
+    use it is just a wider allowlist."""
+    from plexus import sandbox
+
+    cfg = tmp_path / "heart"
+    cfg.mkdir()
+    (cfg / "models.json").write_text(json.dumps({"profiles": {
+        "local": {"endpoint": "http://127.0.0.1:8001/v1"},
+        "local2": {"endpoint": "http://localhost:8002/v1"},
+        "same": {"endpoint": "http://127.0.0.1:8001/v1"},   # one server, one entry
+        "opus": {"model": "claude-opus-5"},                  # no endpoint, no host
+    }}))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("HEART_SANDBOX_ENV", raising=False)
+    monkeypatch.setattr(sandbox, "_VENDOR_HOSTS", {"claude": ("api.anthropic.com",)})
+    monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {"claude": 100.0})
+
+    assert sandbox.allowlist() == ["api.anthropic.com",
+                                   "host.docker.internal:8001",
+                                   "host.docker.internal:8002"]
+
+
+def test_no_seat_means_no_vendor_host(monkeypatch, tmp_path):
+    from plexus import sandbox
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))   # no models.json
+    monkeypatch.delenv("HEART_SANDBOX_ENV", raising=False)
+    monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {})
+    assert sandbox.allowlist() == []
+
+
+def test_a_routable_egress_network_is_reported_not_tolerated(monkeypatch):
+    """--internal is the containment. A network that routes means the agent has
+    the open internet and the proxy it was pointed at is decoration."""
+    from plexus import sandbox
+
+    monkeypatch.setattr(sandbox.shutil, "which", lambda _n: "/usr/bin/docker")
+    monkeypatch.setattr(sandbox, "allowlist", lambda: ["api.anthropic.com"])
+    monkeypatch.setattr(sandbox, "local_model_hosts", lambda: [])
+    monkeypatch.setattr(sandbox, "_running_allow", lambda: "api.anthropic.com")
+    monkeypatch.setattr(sandbox, "_docker",
+                        lambda *a, **k: (0, "false") if a[:2] == ("network", "inspect") else (0, ""))
+    monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None)
+
+    out = "\n".join(sandbox.doctor())
+    assert "NOT --internal" in out
+    assert "open internet" in out
+
+
+def test_fix_creates_the_network_and_starts_the_proxy(monkeypatch, tmp_path):
+    from plexus import sandbox
+
+    script = tmp_path / "egress-proxy.py"
+    script.write_text("# proxy")
+    calls = []
+
+    def fake(*args, **kw):
+        calls.append(args)
+        if args[:2] == ("network", "inspect"):
+            return (1, "No such network")
+        return (0, "")
+
+    monkeypatch.setattr(sandbox.shutil, "which", lambda _n: "/usr/bin/docker")
+    monkeypatch.setattr(sandbox, "_docker", fake)
+    monkeypatch.setattr(sandbox, "allowlist", lambda: ["host.docker.internal:8001"])
+    monkeypatch.setattr(sandbox, "local_model_hosts", lambda: [])
+    monkeypatch.setattr(sandbox, "_running_allow", lambda: None)
+    monkeypatch.setattr(sandbox, "proxy_script", lambda: script)
+    monkeypatch.setattr(sandbox, "reap", lambda: (0, 0))
+    monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None)
+
+    sandbox.doctor(fix=True)
+    assert ("network", "create", "--internal", sandbox.NETWORK) in calls
+    run = next(c for c in calls if c[0] == "run")
+    assert "ALLOW=host.docker.internal:8001" in run
+    # bridge first, then the internal network: the proxy is the only container
+    # that needs a leg in both
+    assert "bridge" in run
+    assert ("network", "connect", sandbox.NETWORK, sandbox.PROXY) in calls

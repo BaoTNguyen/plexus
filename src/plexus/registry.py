@@ -162,6 +162,61 @@ def detect_subscriptions() -> dict[str, float]:
     return out
 
 
+# The file each signed-in CLI authenticates from. Paths, never contents --
+# this is the same fact detect_subscriptions reads a plan claim out of, used a
+# second time for a different purpose.
+_SEAT_FILES = {
+    "claude": ("~/.claude/.credentials.json", "~/.claude.json"),
+    "codex": ("~/.codex/auth.json",),
+}
+
+
+def seat_env() -> dict[str, str]:
+    """The sandbox credential env for a run: which subscription seats exist on
+    this machine, named as paths for heart to mount.
+
+    Why the control plane owns this. Whether a goal may spend a seat is fleet
+    policy and belongs here; how a credential reaches a container -- read-only,
+    files and never directories, agent roles only, never a verifier -- is
+    sandbox mechanics and stays in heart. Plexus decides whether there is
+    anything to mount; heart decides what mounting means.
+
+    Paths, not material, and the distinction is the whole design. A control
+    plane that reads the token turns it into a string, then an env var, then a
+    line in episode.json, `ps` output and the run artifacts -- four durable
+    places, none of them credential stores. Worse for OAuth specifically: a
+    refresh rotates the token at the provider, so N copies handed down means
+    the first sandbox to refresh logs out the other N-1 and your own shell with
+    them. One file on disk, one owner, mounted read-only N times.
+
+    Nothing here is invented. A seat that isn't signed in contributes no path,
+    and `PLEXUS_SEAT=off` withholds every seat for a run that should have none.
+    An operator who set HEART_SANDBOX_HOME_FILES already answered the question
+    and is left alone.
+
+    API keys are deliberately not handled: heart's HEART_SANDBOX_ENV already
+    forwards named ones, and guessing which of a shell's variables is a real
+    credential is how a placeholder like ANTHROPIC_API_KEY=x ends up beating a
+    working seat inside the container. Name them or don't have them.
+    """
+    if os.environ.get("PLEXUS_SEAT", "").strip().lower() in ("off", "0", "none"):
+        return {}
+    if os.environ.get("HEART_SANDBOX_HOME_FILES", "").strip():
+        return {}
+    files = []
+    for group in _SEAT_FILES.values():
+        for name in group:
+            path = Path(name).expanduser()
+            # ponytail: ~/.claude.json goes in whole because the CLI wants it
+            # there and heart derives the container path from the host one, so a
+            # sanitized stub has nowhere to land. It is config and history for
+            # every project on the box, not a credential store. Upgrade path:
+            # src=dest in HEART_SANDBOX_HOME_FILES, then mount a stub.
+            if path.is_file():
+                files.append(str(path))
+    return {"HEART_SANDBOX_HOME_FILES": ",".join(files)} if files else {}
+
+
 def accounting_config() -> dict:
     """Fleet cost inputs that providers do not expose in per-turn telemetry.
 
