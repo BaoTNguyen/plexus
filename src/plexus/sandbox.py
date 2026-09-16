@@ -147,18 +147,78 @@ def reap() -> tuple[int, int]:
     return (len(ids), trees)
 
 
+# What an installer's box needs before any of the below is even worth checking.
+# Named here rather than in a README because a README does not fail a run.
+_REQUIRED = {
+    "git": "apt install git",
+    "docker": "https://docs.docker.com/engine/install/ubuntu/",
+    "uv": "curl -LsSf https://astral.sh/uv/install.sh | sh",
+}
+_AGENTS = ("claude", "codex", "gemini", "opencode")
+
+
+def toolchain(root: str = ".", fix: bool = False) -> list[str]:
+    """Is this checkout runnable at all? Reported before the box's sandbox.
+
+    doctor() answers "can an episode run sandboxed here". This answers the
+    question underneath it -- whether the person who just cloned plexus has
+    the tools the sandbox itself assumes. Missing docker is not a degraded
+    run, it is no run, and it should read differently from a stale allowlist.
+    """
+    import sys
+
+    log: list[str] = []
+    say = log.append
+    r = Path(root)
+
+    v = sys.version_info
+    say(f"python {v.major}.{v.minor}: "
+        + ("ok" if (v.major, v.minor) >= (3, 10) else "too old -- plexus needs >=3.10"))
+
+    for tool, how in _REQUIRED.items():
+        say(f"{tool}: ok" if shutil.which(tool) else f"{tool}: MISSING -- {how}")
+
+    found = [a for a in _AGENTS if shutil.which(a)]
+    say(f"agent cli: {', '.join(found)}" if found
+        else "agent cli: none of " + "/".join(_AGENTS) + " on PATH -- nothing can execute a feature")
+
+    try:
+        import heart  # noqa: F401
+
+        say("heart: importable")
+    except Exception:
+        say("heart: NOT importable -- `uv pip install -e ../heart` (plexus dispatches through it)")
+
+    say("plexus.toml: ok" if (r / "plexus.toml").exists()
+        else "plexus.toml: missing -- run `plexus init`")
+
+    env, example = r / ".env", r / ".env.example"
+    if env.exists():
+        say(".env: ok")
+    elif example.exists():
+        say(".env: missing")
+        if fix:
+            env.write_text(example.read_text())
+            say("  seeded from .env.example -- fill in the real values, it is gitignored")
+    else:
+        say(".env: absent (and no .env.example to seed from)")
+
+    return log
+
+
 def doctor(fix: bool = False) -> list[str]:
     """Report the box's sandbox readiness; with fix=True, make it so.
 
     Read-only by default because "what is wrong" and "change my machine" are
     different requests, and the second one should be typed.
     """
-    log: list[str] = []
+    log: list[str] = toolchain(fix=fix)
     say = log.append
     want = ",".join(allowlist())
 
     if not shutil.which("docker"):
-        return ["docker: not installed -- no sandboxed run can start"]
+        say("docker: not installed -- no sandboxed run can start")
+        return log
 
     rc, out = _docker("network", "inspect", NETWORK, "--format", "{{.Internal}}")
     if rc != 0:
