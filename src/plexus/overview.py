@@ -18,6 +18,7 @@ from __future__ import annotations
 import datetime
 import os
 import re
+import tempfile
 from pathlib import Path
 
 #: key, heading, and the one-line brief that tells a model what belongs here
@@ -157,7 +158,6 @@ def mermaid_blocks(text: str) -> list[str]:
 def demo() -> None:
     """Self-check: round-trip, empty sections stay listed, planner context skips
     blanks, and an unknown key is refused rather than writing outside the dir."""
-    import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         sections = read(root)

@@ -26,6 +26,7 @@ import re
 import signal
 import struct
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -38,9 +39,9 @@ from urllib.parse import parse_qs, urlparse
 
 from heart.runner import CACHE_MULTIPLIERS, speed_multiplier
 
-from . import diagnose, ledger, observe, overview, review
-from .plan import load_plan
-from .run import _feature_state
+from . import diagnose, ledger, observe, overview, registry, review, tasks, term
+from .plan import approve, load_plan
+from .run import _feature_state, _open_pr
 from .spec import load_spec
 
 # root(resolved str) -> Popen we spawned, kept only so we can reap it (avoid
@@ -84,7 +85,6 @@ def menu_roots(base: Path) -> list[Path]:
     user has added (`plexus add`), each expanded to its goal repos. This is how
     a project living outside the `--root` parent still shows up — the multi-root
     workspace, versus `_scan_roots`' single base."""
-    from . import registry
     roots = set(_scan_roots(base))
     for w in registry.workspace_roots():
         roots.update(_scan_roots(w))
@@ -269,7 +269,6 @@ def _open_escalations(recs: list[dict], goal_id: str) -> list[dict]:
 
 
 def _fleet_state(server) -> dict:
-    from . import term
     return {"local_slots": server.local_slots,
             "global_agents": server.global_agents,
             "max_goals": server.max_goals,
@@ -325,7 +324,6 @@ def _validation(root: Path) -> dict:
     and collapsing the two is how a factory ships something that passes every
     test and does the wrong job.
     """
-    from . import tasks as tasklib
     spec = load_spec(root)
     recs = ledger.read(root)
     goal_recs = [r for r in recs if r.get("goal_id") == spec.goal_id]
@@ -335,7 +333,7 @@ def _validation(root: Path) -> dict:
     manual = next((r for r in reversed(goal_recs)
                    if r.get("kind") == "validation.manual_passed"), {})
     landed = [r for r in recs if r.get("kind") == "feature.landed"]
-    board = tasklib.group(root)
+    board = tasks.group(root)
     # tasks that shipped code but nobody has signed off on yet — the queue this
     # tab exists to drain
     awaiting = [t for t in board["done"] if not t.get("reason")]
@@ -369,8 +367,7 @@ def _tasks_discuss_prompt(root: Path) -> str:
     Seeded with the board as it stands and the overview it has to satisfy, so
     the model proposes the gap rather than re-proposing what is already queued.
     """
-    from . import tasks as tasklib
-    board = tasklib.group(root)
+    board = tasks.group(root)
     lines = ["Help me break this project's work into tasks.", ""]
     for bucket in ("active", "blocked", "planned", "done"):
         rows = board.get(bucket) or []
@@ -403,8 +400,7 @@ def _overview_or_note(root: Path) -> str:
 
 
 def tasks_file(root: Path) -> Path:
-    from . import tasks as tasklib
-    return tasklib.tasks_path(root)
+    return tasks.tasks_path(root)
 
 
 def _term_windows(root: Path, roots: list[Path]) -> dict:
@@ -412,7 +408,6 @@ def _term_windows(root: Path, roots: list[Path]) -> dict:
     whose windows have already closed. One switcher over both, because 'the run
     that just finished' is the thing you most want to read and it stops being a
     window the moment it ends."""
-    from . import term
     session = _term_name(root, roots)
     live = term.windows(session)
     live_names = {w["name"] for w in live}
@@ -440,7 +435,6 @@ def _term_name(root: Path, roots: list[Path]) -> str:
 
 
 def _list_goals(roots: list[Path]) -> list[dict]:
-    from . import registry
     meta = registry.project_meta()
     out = []
     for root in roots:
@@ -526,7 +520,7 @@ def _live(root: Path, limit: int = 60) -> list[dict]:
     that the ledger (coarse, durable) deliberately doesn't carry.
     ponytail: full-journal scan per poll; prune by day-file if it ever drags."""
     goal_id = _goal_id(root)
-    try:
+    try:  # lazy: heart may be absent; an empty live view is the fallback
         from heart.pulse import load_events
     except Exception:
         return []
@@ -550,7 +544,7 @@ def _live(root: Path, limit: int = 60) -> list[dict]:
 def _spine_events(root: Path) -> list[dict]:
     """Raw spine events belonging to one goal, oldest first."""
     goal_id = _goal_id(root)
-    try:
+    try:  # lazy: heart may be absent; an empty list is the fallback
         from heart.pulse import load_events
     except Exception:
         return []
@@ -732,7 +726,7 @@ def _fleet_telemetry(roots: list[Path], cutoff: str, cutoff_7d: str,
     # keep whichever reaches further back: the selected window may be a year,
     # and the 7-day figures still have to come out of the same list
     retain_cutoff = min(cutoff, cutoff_7d)
-    try:
+    try:  # lazy: heart may be absent; accounting degrades rather than fails
         from heart.pulse import load_events
         history = load_events()
         retained = [event for event in history
@@ -781,7 +775,6 @@ def _fleet_telemetry(roots: list[Path], cutoff: str, cutoff_7d: str,
         "by_source": [{"source": source, "events": count}
                       for source, count in sources.most_common()],
     }
-    from . import registry
     accounting = registry.accounting_config()
     subscriptions, pricing = accounting["subscriptions"], accounting["pricing"]
     root_map = {str(root.resolve()): {
@@ -1068,7 +1061,6 @@ def _spawn(root: Path, *args: str, local_slots: int = 0,
     cmd = [sys.executable, "-m", "plexus.cli", *args, "--root", str(root)]
     env = _run_env(local_slots, global_agents)
     job = None
-    from . import term
     if term.available():
         stamp = datetime.datetime.now().strftime("%H%M%S")
         work = Path(root) / ".plexus"
@@ -1227,13 +1219,15 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # quiet; this is a local tool
         pass
 
-    def _json(self, obj, code=200):
-        body = json.dumps(obj, default=str).encode()
+    def _send(self, body: bytes, content_type: str, code: int = 200) -> None:
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _json(self, obj, code=200):
+        self._send(json.dumps(obj, default=str).encode(), "application/json", code)
 
     def _static(self, path: Path) -> None:
         try:
@@ -1293,7 +1287,6 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _term_session(self, root: Path, view: str = "shell",
                       cols: int = 120, rows: int = 32):
-        from . import term
         if not term.available():
             return None
         return term.get(self._term_view(root, view), root, cols, rows)
@@ -1308,7 +1301,6 @@ class _Handler(BaseHTTPRequestHandler):
         construction, carries bytes without base64, and costs one connection
         rather than one per key.
         """
-        from . import term
         root = self._root(qs)
         if not self._allowed_root(root):
             return self._json({"error": "unknown root"}, 403)
@@ -1399,12 +1391,7 @@ class _Handler(BaseHTTPRequestHandler):
             if index.exists():
                 self._static(index)
             else:  # source checkout before the optional frontend build
-                body = _HTML.encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send(_HTML.encode(), "text/html; charset=utf-8")
         elif u.path.startswith("/assets/"):
             asset = (_STATIC / u.path.removeprefix("/")).resolve()
             if _STATIC.resolve() not in asset.parents:
@@ -1423,7 +1410,6 @@ class _Handler(BaseHTTPRequestHandler):
         elif u.path == "/api/fleet":
             self._json(_fleet_state(self.server))
         elif u.path == "/api/accounting":
-            from . import registry
             self._json(registry.accounting_config())
         elif u.path == "/api/goal":
             root = self._root(qs)
@@ -1493,13 +1479,11 @@ class _Handler(BaseHTTPRequestHandler):
             root = self._root(qs)
             if not self._allowed_root(root):
                 return self._json({"error": "unknown root"}, 403)
-            from . import tasks
             self._json(tasks.group(root))
         elif u.path == "/api/term/sessions":
             root = self._root(qs)
             if not self._allowed_root(root):
                 return self._json({"error": "unknown root"}, 403)
-            from . import term
             base = _term_name(root, self.server.roots)
             out = []
             for view in ("shell", "overview", "tasks"):
@@ -1540,7 +1524,6 @@ class _Handler(BaseHTTPRequestHandler):
                     setattr(self.server, k, max(0, int(data[k])))
             return self._json(_fleet_state(self.server))
         if u.path == "/api/accounting":
-            from . import registry
             try:
                 return self._json(registry.set_accounting_config(
                     data.get("subscriptions", {}), data.get("pricing", {})))
@@ -1550,7 +1533,6 @@ class _Handler(BaseHTTPRequestHandler):
             # 'Add Folder to Workspace' — register a project dir, then rescan so
             # its goals join the menu immediately. Loopback-guarded like every
             # write path; only ever touches the user's own workspace file.
-            from . import registry
             path = Path(data.get("path", "")).expanduser()
             if not path.is_dir():
                 return self._json({"error": f"not a directory: {path}"}, 400)
@@ -1559,7 +1541,6 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json({"roots": [str(r) for r in self.server.roots]})
         if u.path == "/api/project":
             # grid view state: label (group) / pinned flag for one project.
-            from . import registry
             root = Path(data["root"])
             if not self._allowed_root(root):
                 return self._json({"error": "unknown root"}, 403)
@@ -1588,7 +1569,6 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json({"error": "unknown root"}, 403)
         try:
             if u.path == "/api/task":
-                from . import tasks
                 if data.get("id"):
                     fields = {k: v for k, v in data.items()
                               if k not in ("root", "id")}
@@ -1603,7 +1583,6 @@ class _Handler(BaseHTTPRequestHandler):
                         requires_plan=bool(data.get("requires_plan", True)))
                 return self._json(tasks.group(root))
             elif u.path == "/api/term/close":
-                from . import term
                 return self._json({"ok": term.kill(
                     self._term_view(root, str(data.get("view", ""))))})
             elif u.path == "/api/overview":
@@ -1615,7 +1594,6 @@ class _Handler(BaseHTTPRequestHandler):
                 # One conversation per tab, not one per field. It opens with
                 # everything that tab currently holds, so the agent starts from
                 # what is written rather than asking you to paste it back.
-                from . import term
                 view = str(data.get("view", "overview"))
                 if view not in ("overview", "tasks"):
                     return self._json({"error": "no conversation for that view"}, 400)
@@ -1663,14 +1641,12 @@ class _Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/task-from-issue":
                 # One GitHub issue becomes one task. This is the only place a
                 # source now enters the system — the charter never has one.
-                from . import tasks
                 issue = _import_github_issue(str(data.get("url", "")).strip())
                 tasks.create(root, issue["source_title"] or issue["goal_id"],
                              body=issue["source_body"],
                              source_kind="github", source_url=issue["source_url"])
                 return self._json(tasks.group(root))
             elif u.path == "/api/term/select":
-                from . import term
                 if not term.available():
                     return self._json({"error": "tmux not installed"}, 503)
                 ok = term.select(self._term_view(root, str(data.get("view", "shell"))),
@@ -1683,8 +1659,7 @@ class _Handler(BaseHTTPRequestHandler):
                                   "within it, and there is nothing there yet"}, 409)
                 task_id = str(data.get("task", ""))
                 if task_id:
-                    from . import tasks as tasklib
-                    tasklib.update(root, task_id, state="planning", error="")
+                    tasks.update(root, task_id, state="planning", error="")
                 started = _spawn(root, "plan", *(["--task", task_id] if task_id else []),
                                  local_slots=self.server.local_slots,
                                  global_agents=self.server.global_agents,
@@ -1693,7 +1668,6 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "a plan or run job is already active"}, 409)
                 return self._json({"ok": True, "state": "planning"})
             elif u.path == "/api/approve":
-                from .plan import approve
                 approve(load_spec(root), root, waive=data.get("waive", False),
                         task_id=str(data.get("task", "")))
             elif u.path == "/api/run":
@@ -1722,7 +1696,6 @@ class _Handler(BaseHTTPRequestHandler):
                               notes=str(data.get("notes", "")))
                 ledger.record("goal.finished", goal_id=spec.goal_id, root=root,
                               outcome="scope_satisfied")
-                from .run import _open_pr
                 note = _open_pr(spec, root, str(root))
                 if note:
                     ledger.record("delivery.requested", goal_id=spec.goal_id,
@@ -1964,7 +1937,6 @@ setInterval(()=>{goals();if(sel&&tab!=='live')detail();},5000);
 
 def demo() -> None:
     """Self-check: _goal_detail derives tab state from a hand-written ledger."""
-    import tempfile
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         (root / "plexus.toml").write_text(
@@ -2073,7 +2045,6 @@ def demo() -> None:
             m = menu_roots(root)
             assert root.resolve() in m and wsdir.resolve() in m, m  # both, deduped
             # grid metadata flows into the goal list: label + pinned round-trip
-            from . import registry
             registry.set_project_meta(wsdir, label="scrapers", pinned=True)
             g = next(x for x in _list_goals([wsdir]))
             assert g["label"] == "scrapers" and g["pinned"] is True, g
@@ -2083,6 +2054,7 @@ def demo() -> None:
 
         # live view: spine events filtered to this goal's lineage, both paths
         # (task_id prefix and payload.goal_id), isolated journal
+        # lazy: the self-check emits into an isolated journal; heart only here
         import heart.events as he
         old_sp = os.environ.get("EVENT_JOURNAL_DIR")
         os.environ["EVENT_JOURNAL_DIR"] = str(root / "livejournal")

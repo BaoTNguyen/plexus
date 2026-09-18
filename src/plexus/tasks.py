@@ -22,6 +22,7 @@ from __future__ import annotations
 import datetime
 import json
 import re
+import tempfile
 from pathlib import Path
 
 STATES = ("open", "planning", "ready", "running", "blocked", "landed", "closed")
@@ -249,7 +250,6 @@ def group(root: str | Path = ".") -> dict:
 
 def demo() -> None:
     """Self-check: ordering, gating, cycle refusal, and the plan requirement."""
-    import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         a = create(root, "Add seeds store", requires_plan=False)

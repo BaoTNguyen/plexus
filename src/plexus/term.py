@@ -18,12 +18,15 @@ import base64
 import errno
 import hashlib
 import fcntl
+import io
 import os
 import pty
 import shlex
 import signal
 import struct
+import shutil
 import subprocess
+import tempfile
 import termios
 import threading
 import time
@@ -195,8 +198,7 @@ def available() -> bool:
 
 
 def _which(name: str) -> str | None:
-    from shutil import which
-    return which(name)
+    return shutil.which(name)
 
 
 def _tmux(*args: str) -> subprocess.CompletedProcess:
@@ -535,7 +537,6 @@ def demo() -> None:
     """Self-check: a session echoes what is written to it, replays scrollback to
     a late subscriber, and survives a reader disconnecting."""
     assert available(), "tmux required"
-    import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         session = get("plexus-selfcheck", Path(tmp))
         try:
@@ -603,9 +604,8 @@ def demo() -> None:
             assert ws_accept("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", \
                 ws_accept("dGhlIHNhbXBsZSBub25jZQ==")
             # a masked client frame round-trips through the reader
-            import io as _io
             masked = bytes([0x82, 0x82, 1, 2, 3, 4]) + bytes([ord("A") ^ 1, ord("B") ^ 2])
-            assert ws_read(_io.BytesIO(masked)) == (OP_BINARY, b"AB")
+            assert ws_read(io.BytesIO(masked)) == (OP_BINARY, b"AB")
             # and lengths cross the 126/65536 encoding boundaries correctly
             assert ws_frame(b"x" * 200)[:4] == bytes([0x82, 126, 0, 200])
             assert ws_frame(b"x" * 70000)[:2] == bytes([0x82, 127])
