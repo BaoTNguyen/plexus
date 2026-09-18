@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 
 
@@ -133,6 +134,9 @@ def main(argv: list[str] | None = None) -> int:
     # in whichever shell happened to launch a run. Every subcommand and every
     # child inherits the same answer -- `plexus serve` spawns `python -m
     # plexus.cli`, so the dashboard path comes through this line too.
+    # Every subcommand imports its module here rather than at the top: nearly
+    # all of plexus reaches heart, and `plexus` must stay importable — and
+    # `--help` answerable — on a box where heart is not installed yet.
     from .registry import seat_env
     os.environ.update(seat_env())
     if args.cmd == "init":
@@ -234,7 +238,6 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(prune(args.root, days=args.days, apply=args.apply, force=args.force)))
         return 0
     if args.cmd == "add":
-        from pathlib import Path
         from . import registry
         from .serve import _scan_roots
         p = registry.add_workspace_root(args.path)
@@ -246,7 +249,6 @@ def main(argv: list[str] | None = None) -> int:
                  "; no plexus.toml yet — `plexus init` there to add a goal"))
         return 0
     if args.cmd == "report":
-        from pathlib import Path
         from . import observe
         from .serve import menu_roots
         print("\n".join(observe.report(menu_roots(Path(args.root)))))
@@ -256,6 +258,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(observe.stack(args.hours)))
         return 0
     if args.cmd == "tail":
+        # lazy: only this subcommand reads heart's journal
         from heart.pulse import tail
         tail(n=args.n, source=args.source, follow=not args.no_follow)
         return 0

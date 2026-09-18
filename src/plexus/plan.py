@@ -16,6 +16,8 @@ from heart.env import Workspace
 from heart.runner import run_agent
 
 from . import ledger
+from . import overview as _overview
+from . import tasks as _tasks
 
 PLAN_PROMPT = """\
 You are planning a software goal that will be built one feature at a time by a
@@ -187,12 +189,10 @@ def make_plan(spec, root: str | Path = ".", task_id: str = "") -> list[dict]:
     log = out / "plan.log"
     task = None
     if task_id:
-        from . import tasks as _tasks
         task = next((t for t in _tasks.read(root) if t["id"] == task_id), None)
         if task is None:
             raise SystemExit(f"no task {task_id!r}")
     shown = lambda values: "; ".join(values) if values else "(none)"
-    from . import overview as _overview
     # A task's plan is planned against the task, inside the project's overview.
     # Without this every task would be planned against the whole project and
     # each one would propose rebuilding it.
@@ -243,7 +243,6 @@ def make_plan(spec, root: str | Path = ".", task_id: str = "") -> list[dict]:
         for feat in feats:
             f.write(json.dumps({"plan_id": plan_id, "task_id": task_id, **feat}) + "\n")
     if task_id:
-        from . import tasks as _tasks
         _tasks.update(root, task_id, plan_id=plan_id, state="ready", error="")
     ledger.record(
         "plan.created", goal_id=spec.goal_id, root=root, plan_id=plan_id,
@@ -307,7 +306,6 @@ def amend(spec, feature_id: str, root: str | Path = ".",
     feature's fields and records plan.amended. A landed feature is refused — its
     commit already shipped, so amending it would be a lie. Re-run `plexus run`
     after amending; the feature reopens against the new criterion."""
-    from . import ledger
     plan = load_plan(root)
     feat = next((f for f in plan if f["id"] == feature_id), None)
     if feat is None:
