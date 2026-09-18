@@ -31,8 +31,11 @@ from heart.orchestrate import run_orchestrated
 from heart.taskspec import TaskSpec
 
 from . import events, ledger, scope
+from . import tasks as _tasks
 from .plan import matches as _matches
 from .plan import execution_order, load_plan, parse_expect
+from .registry import seed_upstream
+from .review import classify, report
 
 # heart episode outcomes that are mechanical failures — no valid applied diff to
 # judge a criterion against, so acceptance is skipped and it's a coding failure.
@@ -377,7 +380,6 @@ def _open_pr(spec, root: Path, repo: str) -> str:
             return f"on {branch}: no PR (nothing to merge into {spec.pr_base})"
         if not _git(repo, "remote"):
             return "no git remote: landed locally, no PR"
-        from .review import report
         subprocess.run(["git", "-C", repo, "push", "-u", "origin", branch],
                        capture_output=True, text=True, check=True, timeout=120)
         body = ("Opened by `plexus run` for goal `" + spec.goal_id + "`.\n\n"
@@ -450,6 +452,7 @@ def _probe_regression_signal(repo: str, base: str, timeout: int, goal_id: str) -
         if not verifiers:
             marker.write_text("no verifiers\n")
             return
+        # lazy: inside the best-effort probe, so an import failure stays silent
         from heart.verify import run_verifiers
         runs = []
         for _ in range(2):
@@ -486,7 +489,6 @@ def _mark_blocked(root, task_id: str, recs: list[dict],
     """
     if not task_id:
         return
-    from . import tasks as _tasks
     why = next((str(r.get("reason") or r.get("reason_class") or "escalated")
                 for r in reversed(recs)
                 if r.get("kind") == "escalation.raised"
@@ -511,7 +513,6 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
     of them lands on the board instead of the six I would have remembered.
     """
     root = Path(root)
-    from . import tasks as _tasks
     if not task_id and _tasks.read(root):
         nxt = _tasks.next_task(root)
         if nxt is None:
@@ -529,12 +530,11 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
 
 def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
     """Walk the plan feature by feature. 0 progressed or done, 1 escalated."""
-    from . import tasks as _tasks
     _lock_goal(root)
     repo = str(root)
     # reclaim any worktrees a previously killed run leaked (safe now: the lock we
     # just took means no live episode for this repo exists)
-    try:
+    try:  # lazy: reclaiming leaked worktrees is best-effort, import included
         from heart.env import prune_repo_worktrees
         prune_repo_worktrees(repo)
     except Exception:
@@ -572,7 +572,6 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
             # remember. Best-effort: no registry entry -> the escalation stands
             # alone. (See registry.py.)
             try:
-                from .registry import seed_upstream
                 seeded = seed_upstream(missing, spec.goal_id)
             except Exception:
                 seeded = []
@@ -710,7 +709,6 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 # on the goal's review-hold list waits for a human sign-off
                 # instead of auto-landing. Only on the first pass — a prior hold
                 # means it was resolved, so land it now (see _held_before).
-                from .review import classify
                 cls = classify(feat)
                 if cls in spec.review_hold and not _held_before(
                         ledger.read(root), spec.goal_id, fid):

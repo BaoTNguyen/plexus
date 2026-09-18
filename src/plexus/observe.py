@@ -10,6 +10,7 @@ import datetime
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from .diagnose import phase_counts
 from .ledger import read
 
 
@@ -50,7 +51,7 @@ def _silent_layers(recs: list[dict], root: str, sample: int = 10) -> str | None:
     if not eps:
         return None
     recent = set(sorted(eps)[-sample:])
-    try:
+    try:  # lazy: heart may be absent; the except below is the answer when it is
         from heart.pulse import load_events
         events = [e for e in load_events() if e.get("episode_id") in recent]
     except Exception:
@@ -158,7 +159,7 @@ def insights(root: str = ".") -> list[str]:
         tout = sum(r.get("tokens_out") or 0 for r in costed)
         lines.append(f"cost: ${cost:.4f}  tokens: {tin:,} in / {tout:,} out  "
                      f"over {len(costed)} attempt(s)")
-    from .diagnose import phase_counts  # where defects land across plan/code/test
+    # where defects land across plan/code/test
     phases = phase_counts(recs)
     if phases:
         lines.append("failures by phase: " + " ".join(
@@ -224,6 +225,7 @@ def report(roots: list[str | Path]) -> list[str]:
 def stack(hours: float = 24) -> list[str]:
     """Factory-wide rollup of the shared journal by source — event volume,
     failures, store degradation across heart/arteries/capillaries/marrow/plexus."""
+    # lazy: keeps plexus importable without heart; only `stack` reads the journal
     from heart.pulse import load_events
     # hours 0 means all time; "" sorts below every ISO timestamp
     cutoff = "" if not hours else (_now() - datetime.timedelta(hours=hours)).isoformat()
