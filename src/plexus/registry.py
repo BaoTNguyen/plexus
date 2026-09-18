@@ -18,8 +18,10 @@ just means no seed — the escalation on the downstream side still tells you.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -132,7 +134,6 @@ def detect_subscriptions() -> dict[str, float]:
     A provider is omitted when it can't be determined: signed out, an API key
     instead of a seat, or a plan slug newer than the table. Omitted means
     unknown, never zero — the caller keeps whatever was configured."""
-    import base64
     out: dict[str, float] = {}
 
     try:
@@ -275,7 +276,7 @@ def heart_model_rates() -> dict[str, dict[str, float]]:
     import makes: two rate cards in two repos drift silently, and a wrong cost
     is still a plausible number, so nothing ever alerts.
     """
-    try:
+    try:  # lazy: heart may be absent; an empty card is the documented fallback
         from heart.runner import model_pricing
         return model_pricing()
     except Exception:
@@ -455,8 +456,6 @@ def demo() -> None:
     the operator's real journal, where the dashboard reads them as activity. The
     spine has no per-run scoping, so the only lever is the env var, and owning
     it here means the caller cannot forget."""
-    import os
-    import tempfile
     old_journal = os.environ.get("EVENT_JOURNAL_DIR")
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)

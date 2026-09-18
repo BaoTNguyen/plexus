@@ -17,8 +17,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import subprocess
+import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 NETWORK = os.environ.get("HEART_MODEL_NETWORK", "heart-egress")
 PROXY = os.environ.get("HEART_EGRESS_CONTAINER", "egress")
@@ -58,7 +61,6 @@ def local_model_hosts() -> list[str]:
         cfg = json.loads((cfg_home / "heart" / "models.json").read_text())
     except Exception:
         return []
-    from urllib.parse import urlsplit
 
     ports = set()
     for profile in (cfg.get("profiles") or {}).values():
@@ -77,6 +79,8 @@ def allowlist() -> list[str]:
     signed in. A provider with no seat contributes no host -- the allowlist
     should not be wider than the credentials that could use it.
     """
+    # lazy: registry reaches heart through the ledger; sandbox stays importable
+    # on a box that has not installed heart yet, which is what `doctor` reports
     from .registry import detect_subscriptions
 
     hosts = list(local_model_hosts())
@@ -95,7 +99,7 @@ def allowlist() -> list[str]:
 def proxy_script() -> Path | None:
     """contrib/egress-proxy.py, from the heart checkout the registry names or
     from the installed package's own tree."""
-    try:
+    try:  # lazy: registry reaches heart through the ledger; sandbox must not
         from .registry import load_registry
 
         root = (load_registry() or {}).get("heart")
@@ -103,7 +107,7 @@ def proxy_script() -> Path | None:
             return p
     except Exception:
         pass
-    try:
+    try:  # lazy: the installed-heart fallback; absence is a normal answer here
         import heart
 
         p = Path(heart.__file__).resolve().parents[2] / "contrib" / "egress-proxy.py"
@@ -138,7 +142,7 @@ def reap() -> tuple[int, int]:
     ids = out.split() if rc == 0 else []
     if ids:
         _docker("rm", *ids, timeout=120)
-    try:
+    try:  # lazy: heart may be absent; reclaiming nothing is an acceptable answer
         from heart.env import reclaim
 
         trees = reclaim()
@@ -165,8 +169,6 @@ def toolchain(root: str = ".", fix: bool = False) -> list[str]:
     the tools the sandbox itself assumes. Missing docker is not a degraded
     run, it is no run, and it should read differently from a stale allowlist.
     """
-    import sys
-
     log: list[str] = []
     say = log.append
     r = Path(root)
@@ -182,7 +184,7 @@ def toolchain(root: str = ".", fix: bool = False) -> list[str]:
     say(f"agent cli: {', '.join(found)}" if found
         else "agent cli: none of " + "/".join(_AGENTS) + " on PATH -- nothing can execute a feature")
 
-    try:
+    try:  # lazy: whether heart imports at all is exactly what this line checks
         import heart  # noqa: F401
 
         say("heart: importable")
@@ -260,7 +262,7 @@ def doctor(fix: bool = False) -> list[str]:
                 rc, out = _docker("network", "connect", NETWORK, PROXY)
                 say("  started and attached" if rc == 0 else f"  attach failed: {out}")
 
-    try:
+    try:  # lazy: heart may be absent; the except says so rather than guessing
         from heart.sandbox import image_is_stale
 
         stale = image_is_stale(IMAGE)
@@ -285,8 +287,6 @@ def doctor(fix: bool = False) -> list[str]:
 
 
 def _listening(port: int) -> bool:
-    import socket
-
     with socket.socket() as s:
         s.settimeout(1.0)
         return s.connect_ex(("127.0.0.1", port)) == 0

@@ -54,7 +54,7 @@ def observe(task_id: str, *, goal_id: str, feature_id: str | None = None,
     after the run, not on a later query. Best-effort: heart may be absent, or
     the journal may have rotated, and neither should fail a goal.
     """
-    try:
+    try:  # lazy: heart may be absent, as this function's docstring states
         from heart.pulse import load_events
         events = load_events(task=task_id)
     except Exception:
