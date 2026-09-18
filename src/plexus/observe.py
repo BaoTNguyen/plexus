@@ -14,6 +14,20 @@ from .diagnose import phase_counts
 from .ledger import read
 
 
+def _spend(records: list[dict]) -> tuple[float, int, int, int]:
+    """Cost, tokens in, tokens out, and how many records carried a price.
+
+    Two callers price two different things — ledger attempts and journal
+    role-turns — off the same three keys. One reader, so the goal bill and the
+    factory bill cannot quietly start counting differently.
+    """
+    priced = [r for r in records if r.get("cost_usd") is not None]
+    return (sum(r["cost_usd"] for r in priced),
+            sum(r.get("tokens_in") or 0 for r in priced),
+            sum(r.get("tokens_out") or 0 for r in priced),
+            len(priced))
+
+
 def _pct(values: list[float], q: float) -> float:
     # mirrors heart.pulse._pct; percentiles, never averages
     if not values:
@@ -152,13 +166,10 @@ def insights(root: str = ".") -> list[str]:
     # durable per-goal spend: run.py stamps each landed/failed attempt with the
     # cost of every candidate it ran. Summed here so a multi-week goal's bill
     # survives the journal's day-scale retention (the journal's live total is `stack`).
-    costed = [r for r in recs if r.get("cost_usd") is not None]
-    if costed:
-        cost = sum(r["cost_usd"] for r in costed)
-        tin = sum(r.get("tokens_in") or 0 for r in costed)
-        tout = sum(r.get("tokens_out") or 0 for r in costed)
+    cost, tin, tout, n = _spend(recs)
+    if n:
         lines.append(f"cost: ${cost:.4f}  tokens: {tin:,} in / {tout:,} out  "
-                     f"over {len(costed)} attempt(s)")
+                     f"over {n} attempt(s)")
     # where defects land across plan/code/test
     phases = phase_counts(recs)
     if phases:
@@ -248,13 +259,9 @@ def stack(hours: float = 24) -> list[str]:
     # Disjoint producers (heart and arteries), so both count. episode.finished
     # stays out — its cost is the sum of its own roles, so adding it doubles
     # every episode.
-    priced = [(e.get("payload") or {}) for e in events
-              if e.get("kind") in ("role.finished", "turn.observed")]
-    priced = [p for p in priced if p.get("cost_usd") is not None]
-    if priced:
-        cost = sum(p["cost_usd"] for p in priced)
-        tin = sum(p.get("tokens_in") or 0 for p in priced)
-        tout = sum(p.get("tokens_out") or 0 for p in priced)
+    cost, tin, tout, n = _spend([(e.get("payload") or {}) for e in events
+                                 if e.get("kind") in ("role.finished", "turn.observed")])
+    if n:
         lines.append(f"  cost: ${cost:.4f}  tokens: {tin:,} in / {tout:,} out  "
-                     f"({len(priced)} priced role-turn(s))")
+                     f"({n} priced role-turn(s))")
     return lines

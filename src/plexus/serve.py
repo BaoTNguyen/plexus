@@ -1219,13 +1219,15 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # quiet; this is a local tool
         pass
 
-    def _json(self, obj, code=200):
-        body = json.dumps(obj, default=str).encode()
+    def _send(self, body: bytes, content_type: str, code: int = 200) -> None:
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _json(self, obj, code=200):
+        self._send(json.dumps(obj, default=str).encode(), "application/json", code)
 
     def _static(self, path: Path) -> None:
         try:
@@ -1389,12 +1391,7 @@ class _Handler(BaseHTTPRequestHandler):
             if index.exists():
                 self._static(index)
             else:  # source checkout before the optional frontend build
-                body = _HTML.encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send(_HTML.encode(), "text/html; charset=utf-8")
         elif u.path.startswith("/assets/"):
             asset = (_STATIC / u.path.removeprefix("/")).resolve()
             if _STATIC.resolve() not in asset.parents:
