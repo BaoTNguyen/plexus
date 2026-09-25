@@ -102,7 +102,7 @@ export function OverviewView({ root }: { root: string }) {
       {/* one conversation for all four sections, above them, because they
           answer each other and a model that sees one at a time re-proposes
           what the others settled */}
-      <Discussion root={root} view="overview" label="Discuss the overview" />
+      <Discussion root={root} view="overview" label="Chat" title="Discuss the overview with the agent" />
       {query.data.sections.map((section) => (
         <Section key={section.key} section={section} root={root} assets={query.data.assets} />
       ))}

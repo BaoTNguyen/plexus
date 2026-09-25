@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ChevronDown, ChevronRight, FileText, Github, Lock, Play, Plus } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, FileText, Github, Lock, Play, Plus, X } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api";
 import { Discussion } from "../components/Discussion";
@@ -21,8 +21,8 @@ const BUCKETS = [
   ["planned", "Planned"], ["done", "Done"],
 ] as const;
 
-function TaskCard({ task, isNext, root, busy }: {
-  task: Task; isNext: boolean; root: string; busy: boolean;
+function TaskCard({ task, isNext, root, busy, all }: {
+  task: Task; isNext: boolean; root: string; busy: boolean; all: Task[];
 }) {
   const client = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -41,6 +41,14 @@ function TaskCard({ task, isNext, root, busy }: {
     mutationFn: () => api.post("/run", { root, task: task.id }),
     onSuccess: refresh,
   });
+  // A plan is written, then signed off, then walked. The sign-off had no button
+  // anywhere, so every planned task answered run with "the current plan is not
+  // approved" and there was no way in the UI to make it true.
+  const approvePlan = useMutation({
+    mutationFn: () => api.post("/approve", { root, task: task.id }),
+    onSuccess: refresh,
+  });
+  const awaitingApproval = Boolean(task.plan_id) && !task.plan_approved;
   const design = [
     ["Types", task.design_types], ["Interfaces", task.design_interfaces],
     ["Call paths", task.design_call_paths],
@@ -58,10 +66,10 @@ function TaskCard({ task, isNext, root, busy }: {
         <code>{task.id}</code>
         {isNext && <em className="task-flag">next</em>}
         {task.waiting_on.length > 0 && (
-          <span><Lock size={10} /> waiting on {task.waiting_on.join(", ")}</span>
+          <span><Lock size={10} /> waiting on {task.waiting_on.length}</span>
         )}
         {task.needs_plan && <span>needs a plan before it can run</span>}
-        {task.plan_id && <span>plan {task.plan_id}</span>}
+        {task.plan_id && <span>plan {task.plan_id}{task.plan_approved ? "" : " · awaiting approval"}</span>}
       </div>
       {task.error && (
         <div className="task-error">
@@ -74,6 +82,45 @@ function TaskCard({ task, isNext, root, busy }: {
       {open && (
         <div className="task-detail">
           {task.body && <p className="task-body">{task.body}</p>}
+          {/* Order is the plan, so the order has to be editable where you read
+              it. A blocker used to be an id in a grey line with no way to see
+              what it was or to change your mind about it. */}
+          <div className="task-deps">
+            <span>Blocked by</span>
+            {task.blocked_by.length === 0 && <small>nothing — this can run when its turn comes</small>}
+            <ul>
+              {task.blocked_by.map((id) => {
+                const blocker = all.find((t) => t.id === id);
+                const done = !task.waiting_on.includes(id);
+                return (
+                  <li key={id} className={done ? "dep-done" : ""}>
+                    {done ? <Check size={11} /> : <Lock size={11} />}
+                    <strong>{blocker?.title || id}</strong>
+                    <small>{done ? "landed" : blocker?.state || "unknown"}</small>
+                    <button className="dep-drop" title={`Stop waiting on ${blocker?.title || id}`}
+                      aria-label={`Remove dependency on ${blocker?.title || id}`}
+                      onClick={() => edit.mutate({
+                        blocked_by: task.blocked_by.filter((b) => b !== id),
+                      })}>
+                      <X size={11} />
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+            <select
+              className="panel-filter"
+              value=""
+              aria-label={`Add a blocker for ${task.title}`}
+              onChange={(event) => event.target.value && edit.mutate({
+                blocked_by: [...task.blocked_by, event.target.value],
+              })}
+            >
+              <option value="">add a blocker…</option>
+              {all.filter((t) => t.id !== task.id && !task.blocked_by.includes(t.id))
+                  .map((t) => <option key={t.id} value={t.id}>{t.title}</option>)}
+            </select>
+          </div>
           {task.source_url && (
             <a href={task.source_url} target="_blank" rel="noreferrer">{task.source_url}</a>
           )}
@@ -97,12 +144,21 @@ function TaskCard({ task, isNext, root, busy }: {
                 <FileText size={13} /> plan
               </button>
             )}
-            {task.runnable && (
+            {awaitingApproval && (
+              <button className="button button-small button-primary"
+                disabled={approvePlan.isPending}
+                onClick={() => approvePlan.mutate()}
+                title="Sign off on this task's plan — nothing runs until you do">
+                <Check size={13} /> approve plan
+              </button>
+            )}
+            {task.runnable && !awaitingApproval && (
               <button className="button button-small button-primary"
                 disabled={busy || start.isPending}
                 onClick={() => start.mutate()}
                 title={busy ? "Something is already in flight — tasks run one at a time"
-                            : "Walk this task's plan"}>
+                            : task.plan_id ? "Walk this task's plan"
+                            : "No plan needed — one feature is written from this task, then run"}>
                 <Play size={13} /> run
               </button>
             )}
@@ -116,9 +172,9 @@ function TaskCard({ task, isNext, root, busy }: {
                 <option key={s} value={s}>{s}</option>
               ))}
             </select>
-            {(edit.error || plan.error || start.error) && (
+            {(edit.error || plan.error || start.error || approvePlan.error) && (
               <span className="inline-error">
-                {(edit.error || plan.error || start.error)?.message}
+                {(edit.error || plan.error || start.error || approvePlan.error)?.message}
               </span>
             )}
           </div>
@@ -160,7 +216,7 @@ export function TasksView({ root }: { root: string }) {
 
   return (
     <div className="stack">
-      <Discussion root={root} view="tasks" label="Break down the work with the agent" />
+      <Discussion root={root} view="tasks" label="Chat" title="Break down the work with the agent" />
       <Panel
         title={`Work breakdown · ${data?.tasks.length ?? 0}`}
         action={
@@ -180,13 +236,19 @@ export function TasksView({ root }: { root: string }) {
                 <span>Detail</span>
                 <textarea rows={2} value={body} onChange={(e) => setBody(e.target.value)} />
               </label>
-              <label className="field">
-                <span>Blocked by</span>
-                <select multiple value={blockedBy} size={3}
-                  onChange={(e) => setBlockedBy([...e.target.selectedOptions].map((o) => o.value))}>
-                  {data?.tasks.map((t) => <option key={t.id} value={t.id}>{t.id}</option>)}
-                </select>
-              </label>
+              <fieldset className="field task-blockers">
+                <legend>Blocked by <small>nothing, unless you say otherwise</small></legend>
+                {!data?.tasks.length && <small>no other tasks yet</small>}
+                {data?.tasks.filter((t) => t.state !== "landed" && t.state !== "closed").map((t) => (
+                  <label className="check" key={t.id}>
+                    <input type="checkbox" checked={blockedBy.includes(t.id)}
+                      onChange={(e) => setBlockedBy(e.target.checked
+                        ? [...blockedBy, t.id]
+                        : blockedBy.filter((id) => id !== t.id))} />
+                    <span>{t.title}</span>
+                  </label>
+                ))}
+              </fieldset>
               <label className="check">
                 <input type="checkbox" checked={needsPlan} onChange={(e) => setNeedsPlan(e.target.checked)} />
                 <span>Needs its own plan before it can run</span>
@@ -224,7 +286,7 @@ export function TasksView({ root }: { root: string }) {
             <h3>{label} <span>{data?.[key].length ?? 0}</span></h3>
             {data?.[key].map((task) => (
               <TaskCard key={task.id} task={task} isNext={task.id === next} root={root}
-                busy={Boolean(data?.in_flight.length)} />
+                busy={Boolean(data?.in_flight.length)} all={data?.tasks ?? []} />
             ))}
             {data && !data[key].length && <div className="column-empty">—</div>}
           </section>

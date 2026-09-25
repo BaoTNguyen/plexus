@@ -84,6 +84,21 @@ def add_workspace_root(path: str | Path) -> Path:
     return p
 
 
+def remove_workspace_root(path: str | Path) -> bool:
+    """Drop a project directory from the workspace — the inverse of `add`.
+    Idempotent; returns whether it was present. Leaves project_meta (label,
+    pinned) alone, so re-adding the same path later remembers its scope."""
+    p = str(Path(path).expanduser().resolve())
+    data = _load_ws()
+    roots = data.get("roots", [])
+    kept = [r for r in roots if str(Path(r).expanduser().resolve()) != p]
+    if len(kept) == len(roots):
+        return False
+    data["roots"] = kept
+    _save_ws(data)
+    return True
+
+
 def project_meta() -> dict[str, dict]:
     """Per-project view state — {resolved_path: {label, pinned}} — the grouping
     and pinning the dashboard grid renders. Empty is the flat, ungrouped menu."""
@@ -603,6 +618,15 @@ def demo() -> None:
             assert p == flatrepo.resolve()
             add_workspace_root(flatrepo)                          # idempotent
             assert json.loads(ws.read_text())["roots"].count(str(flatrepo.resolve())) == 1
+
+            # remove: present -> True and gone, absent -> False and no-op,
+            # metadata (label/pin) survives so re-adding remembers its scope
+            set_project_meta(flatrepo, label="grp-b")
+            assert remove_workspace_root(flatrepo) is True
+            assert str(flatrepo.resolve()) not in json.loads(ws.read_text())["roots"]
+            assert remove_workspace_root(flatrepo) is False        # already gone
+            assert project_meta()[str(flatrepo.resolve())]["label"] == "grp-b"
+            add_workspace_root(flatrepo)                            # re-add
 
             # project metadata: label/pin set, per-field clear, entry drop
             fr = str(flatrepo.resolve())
