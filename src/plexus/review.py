@@ -14,6 +14,8 @@ refuses the diff first (see run.py's _stray_paths).
 from __future__ import annotations
 
 import ast
+import fnmatch
+import re
 import subprocess
 from pathlib import Path
 
@@ -35,7 +37,128 @@ MECHANICAL = ("*.md", "docs/*", "docs/**", "tests/*", "tests/**")
 # cross-repo contract moved (see tests/test_heart_api_pin.py)
 PIN_TEST = "tests/test_heart_api_pin.py"
 
-CLASSES = ("spine", "boundary", "leaf", "mechanical")
+# Files that run on the operator's machine without anyone choosing to run the
+# change: agent and editor hooks, CI, pre-commit, direnv, pytest's bootstrap,
+# install-time code in dependency manifests and lockfiles, interpreter startup.
+# The sandbox contains an agent while it works; it cannot contain a diff that
+# lands a SessionStart hook or a conftest.py, which then runs on the host the
+# next time you open the repo or type `pytest`. A dependency an agent found on
+# the web is the same shape, one `pip install` later. So these are read off the
+# diff at land time -- not the plan, which is the agent's own prediction -- and
+# land only with a sign-off. Directory globs for trees, basenames for files
+# that execute wherever they sit.
+EXEC_DIRS = (".claude/**", ".arteries/**", ".codex/**", ".github/**", ".vscode/**",
+             ".devcontainer/**", ".idea/**", ".husky/**")
+EXEC_NAMES = ("conftest.py", "setup.py", "setup.cfg", "pyproject.toml",
+              "requirements*.txt", "uv.lock", "poetry.lock", "Pipfile*",
+              "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+              ".npmrc", ".pre-commit-config.yaml", ".gitlab-ci.yml", ".envrc",
+              "Makefile", "*.pth", "sitecustomize.py", "usercustomize.py")
+
+CLASSES = ("spine", "boundary", "exec", "suspect", "leaf", "mechanical")
+
+
+# Capabilities a backdoor needs and ordinary feature work rarely adds: a way
+# out, a way to run something, a way to hide what it runs. Regexes over added
+# code lines, so a string that merely mentions one can misfire -- acceptable
+# for a gate whose failure mode is "a human looks", not "the work is lost".
+_SUSPECT = (
+    ("network", re.compile(
+        r"^\s*(import|from)\s+(requests|httpx|aiohttp|urllib3|socket|smtplib|ftplib|"
+        r"paramiko|websockets?)\b|urllib\.request|from\s+urllib\s+import\s+request|"
+        r"http\.client|socket\.(socket|create_connection)\(|\bfetch\(|\baxios\b|"
+        r"XMLHttpRequest|new WebSocket\(|\b(curl|wget|nc|ncat)\s+-", re.M)),
+    ("process", re.compile(
+        r"\b(subprocess|os\.system|os\.popen|os\.exec[lv]p?e?|pty\.spawn|child_process|"
+        r"execSync|spawnSync)\b")),
+    ("dynamic code", re.compile(
+        r"(?<![\w.])(eval|exec|compile)\s*\(|__import__\s*\(|importlib\.import_module|"
+        r"\bnew Function\(")),
+    ("deserialisation", re.compile(r"\b(pickle|marshal|dill|shelve)\.loads?\b")),
+    ("decoding", re.compile(r"\bb(64|32|16|85)decode\b|\batob\(|\bcodecs\.decode\b")),
+    ("credential read", re.compile(
+        r"\.ssh/|\.aws/|\.config/gcloud|\.credentials\.json|\bauth\.json|\.netrc|"
+        r"\.docker/config\.json|\.kube/config|\.gnupg/")),
+)
+# a long unbroken base64/hex run is data someone did not want read
+_BLOB = re.compile(r"[A-Za-z0-9+/]{160,}={0,2}|(?:\\x[0-9a-fA-F]{2}){24,}")
+# a dotted name with a real TLD: `http://egress:8888` is a container, not a host
+_URL = re.compile(r"\b(?:https?|wss?)://((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})\b")
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "example.com", "example.org"}
+# Code is what runs. Prose, lockfiles and data mention hosts and modules all day;
+# the manifests and lockfiles that matter are exec_surface's business.
+_CODE = (".py", ".pyw", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".sh", ".bash",
+         ".zsh", ".rb", ".go", ".rs", ".php", ".pl", ".ps1", ".lua")
+_COMMENT = ("#", "//", "/*", "*", "--", "<!--")
+_TEST = re.compile(r"(^|/)tests?/|(^|/)test_[^/]*$|_test\.\w+$|\.(test|spec)\.\w+$")
+
+
+def _baseline(repo: str | Path, base: str, path: str) -> str:
+    """What `path` could already do at the base commit: the file itself, or,
+    for a new file, its directory's code -- a new module in a package that
+    shells out everywhere is not the package's first shell-out."""
+    if (before := _show(repo, f"{base}:{path}")):
+        return before
+    folder = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+    names = subprocess.run(["git", "-C", str(repo), "ls-tree", "--name-only", base, folder],
+                           capture_output=True, text=True).stdout.split()
+    return "\n".join(_show(repo, f"{base}:{n}") for n in names if n.endswith(_CODE))[:400_000]
+
+
+def suspicious(repo: str | Path, base: str, diff: str) -> list[str]:
+    """What a diff newly lets the code do that a backdoor would need.
+
+    Deterministic on purpose: the pipeline reviewer is a model reading a diff
+    an agent wrote, and a diff can carry instructions for its reviewer. A regex
+    cannot be talked out of what it matches.
+
+    *Newly* is the noise filter. A capability counts only when the added code
+    uses it and the code it lands beside did not (_baseline) -- more subprocess
+    calls in a module that already shells out are ordinary work; the first one
+    in a date parser is a question. A URL host counts when it is new and the
+    file can reach the network at all -- otherwise it is a docs link in a
+    string. A long encoded blob counts wherever it appears. Tests may start
+    processes and touch the network without comment: they mock and spawn as a
+    matter of course. Measured over the last 40 commits of heart, plexus,
+    arteries and capillaries before settling on this.
+    """
+    added: dict[str, list[str]] = {}
+    current = None
+    for line in diff.splitlines():
+        if line.startswith("+++ "):
+            target = line[4:].strip()
+            current = target[2:] if target.startswith("b/") else None
+            if current and not current.endswith(_CODE):
+                current = None
+            continue
+        if current and line.startswith("+") and not line.startswith("+++"):
+            if not line[1:].lstrip().startswith(_COMMENT):
+                added.setdefault(current, []).append(line[1:])
+    found = []
+    for path, lines in added.items():
+        before = _baseline(repo, base, path) if base else ""
+        text = "\n".join(lines)
+        for name, pattern in _SUSPECT:
+            if name in ("process", "network") and _TEST.search(path):
+                continue
+            if pattern.search(text) and not pattern.search(before):
+                hit = next(l for l in lines if pattern.search(l))
+                found.append(f"{path}: new {name}: {hit.strip()[:80]}")
+        network = _SUSPECT[0][1]
+        if network.search(text) or network.search(before):
+            known = set(_URL.findall(before)) | _LOCAL_HOSTS
+            for host in sorted(set(_URL.findall(text)) - known):
+                found.append(f"{path}: new host {host}")
+        if _BLOB.search(text):
+            found.append(f"{path}: encoded blob")
+    return found
+
+
+def exec_surface(paths: list[str]) -> list[str]:
+    """The paths in a diff that would execute on the operator's machine."""
+    return [p for p in paths
+            if any(_matches(p, g) for g in EXEC_DIRS)
+            or any(fnmatch.fnmatch(p.rsplit("/", 1)[-1], n) for n in EXEC_NAMES)]
 
 
 def classify(feat: dict) -> str:

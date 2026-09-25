@@ -26,16 +26,30 @@ from urllib.parse import urlsplit
 NETWORK = os.environ.get("HEART_MODEL_NETWORK", "heart-egress")
 PROXY = os.environ.get("HEART_EGRESS_CONTAINER", "egress")
 PROXY_PORT = os.environ.get("HEART_SANDBOX_PROXY_PORT", "8888")
+INJECT_PORT = os.environ.get("HEART_SANDBOX_INJECT_PORT", "8889")
 IMAGE = os.environ.get("HEART_SANDBOX_IMAGE", "heart-agent:latest")
+# The web lane: its own --internal network and its own proxy, because every
+# container on a network reaches every port of every proxy on it -- a shared
+# network would let an "api" task borrow the web lane's reach.
+WEB_NETWORK = os.environ.get("HEART_WEB_NETWORK", "heart-web")
+WEB_PROXY = f"{PROXY}-web"
 
 # What each provider's CLI actually talks to. Narrow on purpose: Claude Code
 # also reaches for mcp-proxy.anthropic.com and a Datadog intake, and the
 # episodes pass without either -- measured, 23 denied telemetry connections in a
-# run that scored a diff.
+# run that scored a diff. Port-pinned: a bare name allows every port on the
+# host, and api.anthropic.com:8443 went through before this.
 _VENDOR_HOSTS = {
-    "claude": ("api.anthropic.com",),
-    "codex": ("chatgpt.com", "api.openai.com"),
+    "claude": ("api.anthropic.com:443",),
+    "codex": ("chatgpt.com:443", "api.openai.com:443"),
 }
+
+# Quad9: answers NXDOMAIN for domains on its threat feeds, which is the
+# malware filter for everything the proxies resolve. host.docker.internal is
+# pinned in /etc/hosts because Docker Desktop resolves it through its own DNS,
+# and pointing --dns elsewhere loses it -- measured, the local model went dark.
+_PROXY_NET_ARGS = ("--dns", "9.9.9.9", "--dns", "149.112.112.112",
+                   "--add-host", "host.docker.internal:host-gateway")
 
 
 def _docker(*args: str, timeout: int = 60) -> tuple[int, str]:
@@ -81,11 +95,17 @@ def allowlist() -> list[str]:
     """
     # lazy: registry reaches heart through the ledger; sandbox stays importable
     # on a box that has not installed heart yet, which is what `doctor` reports
-    from .registry import detect_subscriptions
+    from .registry import detect_subscriptions, injected_seats
 
+    # an injected seat reaches its vendor through the injector, never CONNECT;
+    # the proxy refuses the host anyway, and the list should say what is true
+    injected = injected_seats()
+    skip = ({"claude"} if "anthropic" in injected else set()) | (
+        {"codex"} if "chatgpt" in injected else set())
     hosts = list(local_model_hosts())
     for provider in detect_subscriptions():
-        hosts.extend(_VENDOR_HOSTS.get(provider, ()))
+        if provider not in skip:
+            hosts.extend(_VENDOR_HOSTS.get(provider, ()))
     # an API key is a seat's equivalent for reaching the same host
     if os.environ.get("HEART_SANDBOX_ENV"):
         named = {n.strip() for n in os.environ["HEART_SANDBOX_ENV"].split(",")}
@@ -94,6 +114,27 @@ def allowlist() -> list[str]:
         if "OPENAI_API_KEY" in named:
             hosts.extend(_VENDOR_HOSTS["codex"])
     return sorted(dict.fromkeys(hosts))
+
+
+# OAuth token endpoints. A seat file mounted into a container carries a refresh
+# token, and a refresh rotates it at the provider -- the host's copy dies and
+# you are logged out of your own machine. The api lane never lists these; the
+# web lane's `*` would pass them, so it names them. Nothing a sandboxed agent
+# legitimately does needs to mint a token.
+_REFRESH_HOSTS = ("auth.openai.com", "console.anthropic.com", "platform.claude.com")
+
+
+def lanes() -> list[tuple[str, str, str, str]]:
+    """(network, proxy container, ALLOW, DENY) for each egress lane.
+
+    The api/model lane reaches exactly the allowlist. The web lane reaches any
+    public host on 80/443 (`*` -- the proxy refuses private addresses, IP
+    literals and anything Quad9 filters), plus the local model servers by name,
+    since those are private and `*` alone would refuse them.
+    """
+    return [(NETWORK, PROXY, ",".join(allowlist()), ""),
+            (WEB_NETWORK, WEB_PROXY, ",".join(["*", *local_model_hosts()]),
+             ",".join(_REFRESH_HOSTS))]
 
 
 def proxy_script() -> Path | None:
@@ -116,19 +157,69 @@ def proxy_script() -> Path | None:
         return None
 
 
-def _running_allow() -> str | None:
-    """The ALLOW the proxy is running with, or None if it is not running."""
-    rc, out = _docker("inspect", PROXY, "--format",
-                      "{{.State.Running}}\t{{range .Config.Env}}{{println .}}{{end}}")
+def _running_config(proxy: str) -> dict | None:
+    """The settings a proxy is running with -- ALLOW, INJECT_PORT, whether the
+    seat secrets are mounted -- or None if it is not running. The whole config
+    is compared, not ALLOW alone: a token saved after the proxy started needs
+    the proxy restarted with the mount, even though its allowlist is current."""
+    rc, out = _docker("inspect", proxy, "--format",
+                      "{{.State.Running}}\t{{range .Mounts}}{{.Destination}} {{end}}"
+                      "\t{{range .Config.Env}}{{println .}}{{end}}")
     if rc != 0:
         return None
-    running, _, env = out.partition("\t")
+    running, _, rest = out.partition("\t")
     if running.strip() != "true":
         return None
+    mounts, _, env = rest.partition("\t")
+    have = dict.fromkeys(("ALLOW", "DENY", "INJECT_PORT"), "")
     for line in env.splitlines():
-        if line.startswith("ALLOW="):
-            return line[len("ALLOW="):].strip()
-    return ""
+        key, _, value = line.partition("=")
+        if key in have:
+            have[key] = value.strip()
+    have["secrets"] = "/secrets" in mounts.split()
+    have["codex"] = "/codex" in mounts.split()
+    return have
+
+
+def _wanted_config(allow: str, deny: str = "") -> dict:
+    from .registry import injected_seats
+
+    injected = injected_seats()
+    # secrets whenever anything is injected: the sentinel seed lives there,
+    # and without it the injector accepts nothing
+    return {"ALLOW": allow, "DENY": deny, "INJECT_PORT": INJECT_PORT if injected else "",
+            "secrets": bool(injected), "codex": "chatgpt" in injected}
+
+
+def _start_proxy(proxy: str, network: str, want: dict, script: Path) -> str:
+    """Run one lane's proxy: on bridge for the way out, then attached to the
+    lane's --internal network as the only container there that routes."""
+    from .registry import seat_secrets, sentinel_seed
+
+    if want["INJECT_PORT"]:
+        sentinel_seed()
+    _docker("rm", "-f", proxy)
+    args = ["run", "-d", "--name", proxy, "--restart", "unless-stopped",
+            "--network", "bridge", *_PROXY_NET_ARGS,
+            "-e", f"ALLOW={want['ALLOW']}", "-e", f"DENY={want['DENY']}",
+            "-e", f"PORT={PROXY_PORT}",
+            "-v", f"{script}:/proxy.py:ro"]
+    if want["INJECT_PORT"]:
+        args += ["-e", f"INJECT_PORT={want['INJECT_PORT']}"]
+    # directories, not files: a token rewritten by rename would leave a
+    # single-file bind pointing at the old inode, and the proxy reads the file
+    # on every request precisely so a rotation needs no restart. ~/.codex whole
+    # is the cost of that for Codex -- history included, visible to the proxy
+    # and to nothing an agent runs.
+    if want["secrets"]:
+        args += ["-v", f"{seat_secrets()}:/secrets:ro"]
+    if want["codex"]:
+        args += ["-v", f"{Path.home() / '.codex'}:/codex:ro"]
+    rc, out = _docker(*args, "--entrypoint", "python3", IMAGE, "/proxy.py")
+    if rc != 0:
+        return f"  start failed: {out}"
+    rc, out = _docker("network", "connect", network, proxy)
+    return "  started and attached" if rc == 0 else f"  attach failed: {out}"
 
 
 def reap() -> tuple[int, int]:
@@ -208,6 +299,41 @@ def toolchain(root: str = ".", fix: bool = False) -> list[str]:
     return log
 
 
+def seat_report() -> list[str]:
+    """How each signed-in seat reaches a container, and the step that makes it
+    better. Reported, never done: the token is the operator's to create and to
+    type, and nothing here reads it."""
+    import time
+
+    from .registry import codex_claims, detect_subscriptions, injected_seats, seat_secrets
+
+    seats, injected, where = detect_subscriptions(), injected_seats(), seat_secrets()
+    out = []
+    if "anthropic" in injected:
+        out.append("seat claude: injected by the proxy -- containers hold a sentinel, not the token")
+    elif "claude" in seats:
+        # An editor, not `read -s` in a subshell: that one-liner reads as
+        # nothing happening, and a paste that lands at the prompt instead goes
+        # into shell history.
+        out += ["seat claude: MOUNTED into containers (the real OAuth file). To inject it instead,",
+                "  run `claude setup-token`, then save the token -- in your own terminal:",
+                f"    install -d -m 700 {where}",
+                f"    install -m 600 /dev/null {where}/anthropic",
+                f"    nano {where}/anthropic      # paste, Ctrl-O, Enter, Ctrl-X",
+                "  and `plexus doctor --fix` to restart the proxies with it"]
+    if "chatgpt" in injected:
+        days = (codex_claims().get("exp", 0) - time.time()) / 86400
+        out.append("seat codex: injected by the proxy -- containers hold a sentinel, not the token")
+        if days < 3:
+            # the host CLI is the only refresher: a container's refresh is
+            # refused so it cannot rotate the token out from under the host
+            out.append(f"  its access token {'EXPIRED' if days <= 0 else f'expires in {days:.1f} days'}"
+                       " -- run `codex` once on this machine to refresh it")
+    elif "codex" in seats:
+        out.append("seat codex: mounted into containers")
+    return out
+
+
 def doctor(fix: bool = False) -> list[str]:
     """Report the box's sandbox readiness; with fix=True, make it so.
 
@@ -216,51 +342,46 @@ def doctor(fix: bool = False) -> list[str]:
     """
     log: list[str] = toolchain(fix=fix)
     say = log.append
-    want = ",".join(allowlist())
 
     if not shutil.which("docker"):
         say("docker: not installed -- no sandboxed run can start")
         return log
 
-    rc, out = _docker("network", "inspect", NETWORK, "--format", "{{.Internal}}")
-    if rc != 0:
-        say(f"network {NETWORK}: missing")
-        if fix:
-            rc, out = _docker("network", "create", "--internal", NETWORK)
-            say(f"  created --internal" if rc == 0 else f"  create failed: {out}")
-    elif out.strip() != "true":
-        # not a nit: a routable network means the agent has the open internet and
-        # the proxy it was pointed at is decoration
-        say(f"network {NETWORK}: NOT --internal -- agents on it reach the open internet")
-    else:
-        say(f"network {NETWORK}: ok (--internal)")
-
-    have = _running_allow()
-    if have is None:
-        say(f"proxy {PROXY}: not running")
-    elif have != want:
-        say(f"proxy {PROXY}: running with a stale allowlist")
-        say(f"  running: {have or '(empty)'}")
-        say(f"  wanted:  {want}")
-    else:
-        say(f"proxy {PROXY}: ok ({want})")
-    if fix and have != want:
-        script = proxy_script()
-        if not script:
-            say("  cannot fix: contrib/egress-proxy.py not found (register the heart checkout)")
-        elif not want:
-            say("  cannot fix: nothing to allow -- no local model and no seat detected")
+    for network, proxy, allow, deny in lanes():
+        rc, out = _docker("network", "inspect", network, "--format", "{{.Internal}}")
+        if rc != 0:
+            say(f"network {network}: missing")
+            if fix:
+                rc, out = _docker("network", "create", "--internal", network)
+                say(f"  created --internal" if rc == 0 else f"  create failed: {out}")
+        elif out.strip() != "true":
+            # not a nit: a routable network means the agent has the open internet
+            # and the proxy it was pointed at is decoration
+            say(f"network {network}: NOT --internal -- agents on it reach the open internet")
         else:
-            _docker("rm", "-f", PROXY)
-            rc, out = _docker(
-                "run", "-d", "--name", PROXY, "--restart", "unless-stopped",
-                "--network", "bridge", "-e", f"ALLOW={want}", "-e", f"PORT={PROXY_PORT}",
-                "-v", f"{script}:/proxy.py:ro", "--entrypoint", "python3", IMAGE, "/proxy.py")
-            if rc != 0:
-                say(f"  start failed: {out}")
+            say(f"network {network}: ok (--internal)")
+
+        want = _wanted_config(allow, deny)
+        have = _running_config(proxy)
+        if have is None:
+            say(f"proxy {proxy}: not running")
+        elif have != want:
+            say(f"proxy {proxy}: running with stale settings")
+            say(f"  running: {have}")
+            say(f"  wanted:  {want}")
+        else:
+            say(f"proxy {proxy}: ok ({allow or 'injector only'})")
+        if fix and have != want:
+            script = proxy_script()
+            if not script:
+                say("  cannot fix: contrib/egress-proxy.py not found (register the heart checkout)")
+            elif not allow and not want["INJECT_PORT"]:
+                say("  cannot fix: nothing to allow -- no local model and no seat detected")
             else:
-                rc, out = _docker("network", "connect", NETWORK, PROXY)
-                say("  started and attached" if rc == 0 else f"  attach failed: {out}")
+                say(_start_proxy(proxy, network, want, script))
+
+    for line in seat_report():
+        say(line)
 
     try:  # lazy: heart may be absent; the except says so rather than guessing
         from heart.sandbox import image_is_stale
