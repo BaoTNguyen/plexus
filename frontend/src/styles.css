@@ -201,6 +201,60 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
   padding: 0 13px;
 }
 .sidebar-empty { color: var(--faint); padding: 20px 8px; text-align: center; }
+.scope-row {
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+}
+.scope-row.active { background: var(--panel-raised); border-color: var(--line); }
+.scope-column {
+  background: rgb(13 18 24 / 78%);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex: 0 0 300px;
+  flex-direction: column;
+  min-width: 0;
+  overflow: auto;
+}
+.scope-column-header {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  height: 45px;
+  justify-content: space-between;
+  padding: 0 13px;
+}
+.scope-view-toggle {
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 4px;
+  padding: 7px;
+}
+.scope-view-toggle button {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--dim);
+  cursor: pointer;
+  flex: 1;
+  font-size: 11px;
+  padding: 5px 0;
+}
+.scope-view-toggle button.active { background: var(--panel-raised); color: var(--fg); }
+.scope-repo-list, .scope-episode-list { flex: 1; overflow: auto; padding: 7px; }
+.scope-episode-row {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 8px;
+}
+.scope-episode-row:hover { background: var(--panel); }
+.scope-episode-row small { color: var(--dim); font-size: 10px; }
 .main-content { flex: 1; min-width: 0; overflow: auto; }
 .page { margin: 0 auto; max-width: 1540px; padding: 24px; }
 .page-heading, .project-heading {
@@ -838,3 +892,69 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .terminal-focus.has-focus { color: var(--ok); }
 .terminal-input-error { color: var(--bad); font-size: 10px; }
 .dot-reconnecting { animation: pulse 1.2s infinite; background: var(--warn); }
+
+/* a finished run, replayed by the same emulator that draws the live pane */
+.transcript-bar {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 10px;
+  padding: 6px 12px;
+}
+.transcript-bar small { color: var(--faint); font-size: 11px; }
+.transcript-term { height: 60vh; overflow: auto; padding: 8px 4px 4px 12px; }
+.transcript-term .xterm { height: 100%; }
+.transcript-filter {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  padding: 7px 12px 3px;
+}
+.transcript-filter input {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--fg);
+  padding: 4px 8px;
+  width: 220px;
+}
+.transcript-filter small { color: var(--faint); font-size: 11px; }
+.transcript-lines {
+  list-style: none;
+  margin: 0;
+  max-height: 60vh;
+  overflow: auto;
+  padding: 6px 0 10px;
+}
+.transcript-lines li { display: flex; gap: 12px; padding: 0 12px; }
+.transcript-lines li:hover { background: var(--panel-raised); }
+.transcript-lines time {
+  color: var(--faint);
+  flex: 0 0 62px;
+  font-variant-numeric: tabular-nums;
+}
+/* the recording decides where a line ends; wrapping it somewhere else is how
+   a column of output stops lining up */
+.transcript-lines span { white-space: pre-wrap; word-break: break-word; }
+
+/* dependencies, where you read the task rather than in a form elsewhere */
+.task-deps { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+.task-deps > span { color: var(--faint); font-size: 10px; letter-spacing: .09em; text-transform: uppercase; }
+.task-deps > small { color: var(--faint); display: block; padding: 4px 0; }
+.task-deps ul { list-style: none; margin: 4px 0 6px; padding: 0; }
+.task-deps li { align-items: center; display: flex; gap: 6px; padding: 3px 0; }
+.task-deps li strong { font-weight: 600; }
+.task-deps li small { color: var(--faint); }
+.task-deps li.dep-done strong { color: var(--dim); text-decoration: line-through; }
+.dep-drop {
+  background: transparent;
+  border: 0;
+  color: var(--faint);
+  cursor: pointer;
+  margin-left: auto;
+  padding: 2px;
+}
+.dep-drop:hover { color: var(--bad); }
+.task-blockers { border: 0; margin: 0; padding: 0; }
+.task-blockers legend { color: var(--dim); padding: 0 0 4px; }
+.task-blockers legend small { color: var(--faint); margin-left: 6px; }

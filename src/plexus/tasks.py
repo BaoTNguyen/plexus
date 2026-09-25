@@ -206,19 +206,36 @@ def next_task(root: str | Path = ".") -> dict | None:
     return queue[0] if queue else None
 
 
+#: every field a reader may assume is present, and what it is when absent.
+#: The file is append-only and older than some of these fields, so a task
+#: written in August has no `design_types` — and a UI that trusted the shape
+#: crashed on the first card it opened. Filling them in on the way out keeps
+#: the fix in one place instead of one guard per consumer.
+_ROW_DEFAULTS = {
+    "body": "", "source_kind": "manual", "source_url": "", "blocked_by": [],
+    "requires_plan": True, "plan_id": "", "design_types": [],
+    "design_interfaces": [], "design_call_paths": [], "error": "", "pr": 0,
+    "reason": "", "order": 0,
+}
+
+
 def board(root: str | Path = ".") -> dict:
     """Everything the tasks tab renders, computed once."""
     all_tasks = read(root)
     by_id = {t["id"]: t for t in all_tasks}
     rows = []
     for task in sorted(all_tasks, key=lambda t: (t.get("order", 0), t["created"])):
-        waiting = blockers(root, task, by_id)
+        # defaults first, then the record, then what is derived from it — a
+        # task written before `requires_plan` existed must read as needing a
+        # plan here and on screen, not as one thing in each place
+        row = {**_ROW_DEFAULTS, **task}
+        waiting = blockers(root, row, by_id)
         rows.append({
-            **task,
+            **row,
             "waiting_on": waiting,
-            "runnable": (task.get("state") in ("open", "ready") and not waiting
-                         and (not task.get("requires_plan") or task.get("plan_id"))),
-            "needs_plan": bool(task.get("requires_plan")) and not task.get("plan_id"),
+            "runnable": bool(row["state"] in ("open", "ready") and not waiting
+                             and (not row["requires_plan"] or row["plan_id"])),
+            "needs_plan": bool(row["requires_plan"]) and not row["plan_id"],
         })
     nxt = next_task(root)
     return {"tasks": rows, "next": nxt["id"] if nxt else "",
@@ -299,6 +316,19 @@ def demo() -> None:
         assert [t["id"] for t in g["active"]] == [b["id"]], g["active"]
         assert [t["id"] for t in g["blocked"]] == [c["id"]], g["blocked"]
         assert [t["id"] for t in g["planned"]] == [d["id"]], g["planned"]
+
+        # a record written before a field existed still renders: every row
+        # carries the whole shape, defaulted, not whatever was on disk when it
+        # was written. The tasks tab read `design_types` off a 2026 record and
+        # crashed on the first card anyone opened.
+        _append(root, {"id": "ancient", "title": "Old row", "state": "open",
+                       "created": _now()})
+        old_row = next(t for t in board(root)["tasks"] if t["id"] == "ancient")
+        assert old_row["design_types"] == [] and old_row["pr"] == 0, old_row
+        assert old_row["error"] == "" and old_row["blocked_by"] == []
+        # and the derived fields agree with the defaults, not with the gaps
+        assert old_row["requires_plan"] and old_row["needs_plan"], old_row
+        assert old_row["runnable"] is False, old_row
     print("tasks self-check ok")
 
 

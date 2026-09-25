@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import secrets
 import tempfile
 import tomllib
 from pathlib import Path
@@ -81,6 +82,21 @@ def add_workspace_root(path: str | Path) -> Path:
         roots.append(str(p))
         _save_ws(data)
     return p
+
+
+def remove_workspace_root(path: str | Path) -> bool:
+    """Drop a project directory from the workspace — the inverse of `add`.
+    Idempotent; returns whether it was present. Leaves project_meta (label,
+    pinned) alone, so re-adding the same path later remembers its scope."""
+    p = str(Path(path).expanduser().resolve())
+    data = _load_ws()
+    roots = data.get("roots", [])
+    kept = [r for r in roots if str(Path(r).expanduser().resolve()) != p]
+    if len(kept) == len(roots):
+        return False
+    data["roots"] = kept
+    _save_ws(data)
+    return True
 
 
 def project_meta() -> dict[str, dict]:
@@ -144,23 +160,28 @@ def detect_subscriptions() -> dict[str, float]:
     except Exception:
         pass
 
+    plan = str((codex_claims().get("https://api.openai.com/auth") or {}).get(
+        "chatgpt_plan_type", "")).lower()
+    if plan in _SEAT_USD["codex"]:
+        out["codex"] = _SEAT_USD["codex"][plan]
+    return out
+
+
+def codex_claims() -> dict:
+    """The claims of Codex's ChatGPT access token, or {} for an API key, a
+    signed-out CLI or anything unreadable. Claims only -- the plan, the
+    expiry -- never the token itself, which is not logged, copied or sent.
+
+    An API key is metered per token, not a seat: heart already prices those
+    turns from models.json, so a seat reading here would double-count."""
     try:
         auth = json.loads((Path.home() / ".codex" / "auth.json").read_text())
-        # an API key is metered per token, not a seat — heart already prices
-        # those turns from models.json, so a seat cost would double-count
-        if auth.get("auth_mode") == "chatgpt":
-            token = (auth.get("tokens") or {}).get("access_token") or ""
-            payload = token.split(".")[1]
-            claims = json.loads(base64.urlsafe_b64decode(
-                payload + "=" * (-len(payload) % 4)))
-            plan = str((claims.get("https://api.openai.com/auth") or {}).get(
-                "chatgpt_plan_type", "")).lower()
-            if plan in _SEAT_USD["codex"]:
-                out["codex"] = _SEAT_USD["codex"][plan]
+        if auth.get("auth_mode") != "chatgpt":
+            return {}
+        payload = ((auth.get("tokens") or {}).get("access_token") or "").split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
     except Exception:
-        pass
-
-    return out
+        return {}
 
 
 # The file each signed-in CLI authenticates from. Paths, never contents --
@@ -170,6 +191,56 @@ _SEAT_FILES = {
     "claude": ("~/.claude/.credentials.json", "~/.claude.json"),
     "codex": ("~/.codex/auth.json",),
 }
+
+
+# The dev environment a contained agent should share with the host one: user
+# settings (model, hooks such as tagore's), global instructions, skills and
+# plugins. Read-only in the container, config not credentials, and the reason a
+# contained planner still plans on Opus in your house style rather than on the
+# account default with no conventions.
+_DEV_FILES = ("~/.claude/settings.json", "~/.claude/CLAUDE.md")
+_DEV_DIRS = ("~/.claude/skills", "~/.claude/plugins")
+
+
+def seat_secrets() -> Path:
+    """Where seat tokens for the egress proxy's injector live: one file per
+    route (`anthropic`), mode 0600, mounted read-only into the proxy and
+    nowhere else. Beside heart's models.json because heart's proxy reads it."""
+    cfg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return cfg / "heart" / "secrets"
+
+
+def sentinel_seed() -> Path:
+    """This box's sentinel seed, created on first use: 32 random bytes in the
+    secrets dir, 0600 in a 0700 directory.
+
+    What an agent holds instead of a seat is derived from it (heart
+    sandbox.sentinels), so it is worth something only to a container that was
+    handed it. It used to be a constant in heart's source -- anyone reading it
+    could use the injector, including a run whose seats were withheld. To
+    rotate: delete the file and run `plexus doctor --fix`.
+    """
+    path = seat_secrets() / "sentinel"
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(secrets.token_urlsafe(32))
+    return path
+
+
+def injected_seats() -> list[str]:
+    """Routes whose seat is injected by the proxy rather than mounted.
+
+    anthropic once the operator saves a `claude setup-token` for the proxy;
+    chatgpt whenever Codex is signed in with a ChatGPT seat, because its
+    auth.json is already the file the proxy reads -- there is nothing to save,
+    and the alternative is that file inside every container. The host's own
+    `codex` stays the one thing that refreshes it."""
+    routes = [r for r in ("anthropic",) if (seat_secrets() / r).is_file()]
+    if codex_claims():
+        routes.append("chatgpt")
+    return routes
 
 
 def seat_env() -> dict[str, str]:
@@ -192,30 +263,61 @@ def seat_env() -> dict[str, str]:
 
     Nothing here is invented. A seat that isn't signed in contributes no path,
     and `PLEXUS_SEAT=off` withholds every seat for a run that should have none.
+    The dev environment (_DEV_FILES, _DEV_DIRS) is named alongside, and
+    `PLEXUS_DEV_ENV=off` withholds it.
     An operator who set HEART_SANDBOX_HOME_FILES already answered the question
     and is left alone.
+
+    Better than a path is no credential at all. A seat token saved under
+    seat_secrets() is injected by the egress proxy: the container is handed a
+    sentinel and the proxy swaps in the real token on the way out, so that
+    seat's files are not mounted. HEART_SANDBOX_INJECT tells heart which seats
+    arrive that way.
 
     API keys are deliberately not handled: heart's HEART_SANDBOX_ENV already
     forwards named ones, and guessing which of a shell's variables is a real
     credential is how a placeholder like ANTHROPIC_API_KEY=x ends up beating a
     working seat inside the container. Name them or don't have them.
     """
-    if os.environ.get("PLEXUS_SEAT", "").strip().lower() in ("off", "0", "none"):
-        return {}
+    off = ("off", "0", "none")
+    seats = os.environ.get("PLEXUS_SEAT", "").strip().lower() not in off
+    injected = injected_seats() if seats else []
+    env = {}
+    if injected:
+        sentinel_seed()  # heart derives the stand-ins from it; must exist first
+        env["HEART_SANDBOX_INJECT"] = ",".join(injected)
+    # the dev environment rides along unless the operator says otherwise --
+    # PLEXUS_DEV_ENV=off, or naming the dirs themselves
+    dev = os.environ.get("PLEXUS_DEV_ENV", "").strip().lower() not in off
+    dirs = [str(Path(d).expanduser()) for d in _DEV_DIRS
+            if dev and Path(d).expanduser().is_dir()]
+    if dirs and not os.environ.get("HEART_SANDBOX_HOME_DIRS", "").strip():
+        env["HEART_SANDBOX_HOME_DIRS"] = ",".join(dirs)
     if os.environ.get("HEART_SANDBOX_HOME_FILES", "").strip():
-        return {}
-    files = []
-    for group in _SEAT_FILES.values():
+        return env
+    files = [str(Path(f).expanduser()) for f in _DEV_FILES
+             if dev and Path(f).expanduser().is_file()]
+    if "chatgpt" in injected:
+        # the plan is the one true fact the stand-in auth.json carries
+        plan = (codex_claims().get("https://api.openai.com/auth") or {}).get("chatgpt_plan_type")
+        if plan:
+            env["HEART_SANDBOX_CODEX_PLAN"] = str(plan)
+    for provider, group in _SEAT_FILES.items() if seats else ():
+        if (provider, True) in (("claude", "anthropic" in injected),
+                                ("codex", "chatgpt" in injected)):
+            continue  # the proxy holds it; the container gets a sentinel
         for name in group:
             path = Path(name).expanduser()
             # ponytail: ~/.claude.json goes in whole because the CLI wants it
             # there and heart derives the container path from the host one, so a
             # sanitized stub has nowhere to land. It is config and history for
-            # every project on the box, not a credential store. Upgrade path:
-            # src=dest in HEART_SANDBOX_HOME_FILES, then mount a stub.
+            # every project on the box, not a credential store. An injected
+            # seat skips it entirely, which is the real upgrade path.
             if path.is_file():
                 files.append(str(path))
-    return {"HEART_SANDBOX_HOME_FILES": ",".join(files)} if files else {}
+    if files:
+        env["HEART_SANDBOX_HOME_FILES"] = ",".join(files)
+    return env
 
 
 def accounting_config() -> dict:
@@ -516,6 +618,15 @@ def demo() -> None:
             assert p == flatrepo.resolve()
             add_workspace_root(flatrepo)                          # idempotent
             assert json.loads(ws.read_text())["roots"].count(str(flatrepo.resolve())) == 1
+
+            # remove: present -> True and gone, absent -> False and no-op,
+            # metadata (label/pin) survives so re-adding remembers its scope
+            set_project_meta(flatrepo, label="grp-b")
+            assert remove_workspace_root(flatrepo) is True
+            assert str(flatrepo.resolve()) not in json.loads(ws.read_text())["roots"]
+            assert remove_workspace_root(flatrepo) is False        # already gone
+            assert project_meta()[str(flatrepo.resolve())]["label"] == "grp-b"
+            add_workspace_root(flatrepo)                            # re-add
 
             # project metadata: label/pin set, per-field clear, entry drop
             fr = str(flatrepo.resolve())

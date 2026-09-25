@@ -17,8 +17,12 @@ import { TerminalView } from "../views/TerminalView";
  *  "end conversation" kills it — a button labelled close on a terminal reads
  *  as "collapse this", and wiring that to a kill destroyed conversations
  *  people meant to put away for a minute. */
-export function Discussion({ root, view, label }: {
+export function Discussion({ root, view, label, title }: {
+  /** what the button says — short, because it sits above the thing it acts on
+   *  and a sentence on a button reads as a paragraph you have to parse */
   root: string; view: "overview" | "tasks"; label: string;
+  /** the long version, on hover, where prose belongs */
+  title?: string;
 }) {
   const client = useQueryClient();
   const [hidden, setHidden] = useState(false);
@@ -48,9 +52,9 @@ export function Discussion({ root, view, label }: {
           className="button button-primary"
           onClick={() => { setHidden(false); if (!open) start.mutate(); }}
           disabled={start.isPending}
-          title={open ? "Already running — this brings it back into view" : label}
+          title={open ? "Already running — this brings it back into view" : (title || label)}
         >
-          <Bot size={14} /> {open ? "conversation running" : label}
+          <Bot size={14} /> {open ? "chatting" : label}
         </button>
         {open && (
           <>
@@ -60,7 +64,7 @@ export function Discussion({ root, view, label }: {
             <button className="button button-danger" onClick={() => end.mutate()}
               disabled={end.isPending}
               title="Ends the session for good. Everything else leaves it running.">
-              end conversation
+              end
             </button>
           </>
         )}

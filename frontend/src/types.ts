@@ -4,6 +4,11 @@ export type Goal = {
   project_id: string;
   goal_id: string;
   goal_state: GoalState;
+  /** the registered root (CLI --root or a `plexus add`ed folder) this repo was
+   *  discovered under — repos sharing one auto-group into a scope unless
+   *  `label` overrides it. A repo added on its own is its own scope. */
+  scope_id: string;
+  scope_name: string;
   label: string;
   pinned: boolean;
   running: boolean;
@@ -105,6 +110,7 @@ export type Episode = {
   /** stamped on by the dashboard when episodes from several repos are merged */
   project_id?: string;
   goal_id?: string;
+  project_name?: string;
 };
 
 /** A row in the live tail: one spine event, flattened for display. */
@@ -278,6 +284,9 @@ export type Task = {
   waiting_on: string[];
   runnable: boolean;
   needs_plan: boolean;
+  /** whether this task's own plan has been approved — a task carries its own
+   *  plan, so the project-level flag answers a different question */
+  plan_approved: boolean;
 };
 
 export type TaskBoard = {
@@ -322,3 +331,8 @@ export type Overview = { sections: OverviewSection[]; assets: string[] };
 
 /** Live tmux sessions for a project: the shell, plus any open conversation. */
 export type TermSessions = { sessions: { view: string; name: string }[]; base: string };
+
+/** One line of a replayed terminal recording. `ts` is empty on recordings made
+ *  before timing was captured — there is no time to show, and inventing one
+ *  would be worse than the gap. */
+export type TranscriptLine = { ts: string; text: string };
