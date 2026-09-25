@@ -39,7 +39,9 @@ episodes_per_goal = 25
 name = "claude"   # any heart agent: claude|codex|gemini|opencode|api[:profile]|shell
 timeout = 300
 # cmd = "..."     # custom agent template, prompt in $HEART_PROMPT (overrides name)
+# network = "web" # under HEART_SANDBOX: web (public internet, filtered) | api | model
 # pipeline = true # build each feature with heart's implement/test/review roles
+#                 # (default: on when network is "web", off otherwise)
 #                 # instead of one solo turn; a reviewer REJECT blocks the land
 # orchestrate = true
 #                 # let heart split each feature into a dependency graph of
@@ -49,10 +51,14 @@ timeout = 300
 #                 # large enough to have independent parts.
 
 [review]
-hold = ["spine", "boundary"]
+hold = ["spine", "boundary", "exec", "suspect"]
 # risk classes that escalate for your sign-off instead of auto-landing, even
-# when acceptance is green — the software-factory boundary. leaf/mechanical
-# features still land unattended; the classes you list here wait for you.
+# when acceptance is green — the software-factory boundary. exec is read off
+# the diff: hooks, CI, manifests, conftest.py — files that run on your machine.
+# suspect is too: a diff that newly adds network calls, processes, dynamic
+# code, decoding, credential reads, unseen URL hosts or encoded blobs.
+# leaf/mechanical features still land unattended; the classes you list here
+# wait for you.
 pr_base = "main"
 # when the goal finishes green, push the branch and open a PR into this base,
 # with `plexus review` as the body. Set to "" to land locally and never push.
@@ -79,11 +85,19 @@ class GoalSpec:
     # *within* whichever feature it was handed. A serial feature plan is not a
     # reason for serial subtasks.
     orchestrate: bool = False
+    # Which heart network the goal's agent turns get under HEART_SANDBOX: "web"
+    # (any public host via the egress-web proxy, which refuses private addresses
+    # and filters DNS), "api" (the vendor allowlist only) or "model" (the local
+    # model only). Web by default because build agents are expected to look
+    # things up; a goal that never should can say "api". Verifiers and
+    # acceptance checks get no network whatever this says.
+    network: str = "web"
     # Risk classes that wait for a human sign-off before landing even when
-    # acceptance is green. On by default for the two classes that can break
-    # something no test covers: an unattended factory whose riskiest commits
-    # land unread is not a factory, it is a liability.
-    review_hold: tuple[str, ...] = ("spine", "boundary")
+    # acceptance is green. On by default for the classes that can break
+    # something no test covers, or run on your machine once landed: an
+    # unattended factory whose riskiest commits land unread is not a factory,
+    # it is a liability.
+    review_hold: tuple[str, ...] = ("spine", "boundary", "exec", "suspect")
     pr_base: str = "main"  # "" disables pushing/PR-opening entirely
     # The one human-judgement field that is not prose: claims no suite can
     # make, which gate delivery until you confirm them. Structured because
@@ -110,11 +124,14 @@ def load_spec(root: str | Path = ".") -> GoalSpec:
         episodes_per_goal=int(budgets.get("episodes_per_goal", 25)),
         agent=agent.get("name", "claude"),
         agent_cmd=agent.get("cmd"),
-        pipeline=bool(agent.get("pipeline", False)),
+        # a web-lane goal gets a reviewer unless it says otherwise: its
+        # implementer read pages nobody vetted
+        pipeline=bool(agent.get("pipeline", agent.get("network", "web") == "web")),
         orchestrate=bool(agent.get("orchestrate", False)),
         timeout=int(agent.get("timeout", 300)),
+        network=str(agent.get("network", "web")),
         spec_hash=hashlib.sha256(raw).hexdigest()[:12],
-        review_hold=tuple(review.get("hold", ("spine", "boundary"))),
+        review_hold=tuple(review.get("hold", ("spine", "boundary", "exec", "suspect"))),
         pr_base=review.get("pr_base", "main"),
         # `[scope].manual_checks` is where these lived before the overview split
         # the prose out; read it so an existing repo keeps its checks.
@@ -158,11 +175,31 @@ def _exclude_plexus_state(root: str | Path) -> None:
                 f.write("\n.plexus/\nplexus.toml\nruns/\n")
 
 
+def default_network(root: str | Path = ".") -> str:
+    """The lane a new goal starts on: "web" only for a repo GitHub says is
+    public, "api" for everything else.
+
+    On the web lane an agent can send the repo anywhere, which costs nothing
+    when the repo is already public and everything when it is not. Unknown --
+    no remote, no `gh`, no answer -- is treated as private: the mistake worth
+    avoiding is a private repo that starts on the open web because nobody
+    thought to change a default. Decided once, here, and written into the
+    file, so it is visible and yours to change.
+    """
+    try:
+        r = subprocess.run(["gh", "repo", "view", "--json", "visibility", "-q", ".visibility"],
+                           cwd=str(root), capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return "api"
+    return "web" if r.returncode == 0 and r.stdout.strip() == "PUBLIC" else "api"
+
+
 def init(root: str | Path = ".") -> Path:
     p = spec_path(root)
     if p.exists():
         raise SystemExit(f"{p} already exists")
-    p.write_text(TEMPLATE)
+    net = default_network(root)
+    p.write_text(TEMPLATE.replace('# network = "web" #', f'network = "{net}"   #', 1))
     _exclude_plexus_state(root)
     return p
 
@@ -186,6 +223,6 @@ def scaffold_goal(root: str | Path, goal_id: str, text: str, context: str = "") 
         'open_questions = []\nmanual_checks = []\n\n'
         '[ground_truth]\nsuite = "python3 -m pytest -q"\n\n'
         "[budgets]\nattempts_per_feature = 3\nepisodes_per_goal = 25\n\n"
-        '[agent]\nname = "claude"\ntimeout = 300\n')
+        f'[agent]\nname = "claude"\ntimeout = 300\nnetwork = "{default_network(root)}"\n')
     _exclude_plexus_state(root)
     return True

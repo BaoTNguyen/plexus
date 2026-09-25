@@ -232,7 +232,7 @@ assert classify_phase("expect_mismatch", "pass", False) == "intent"
 # the default is the policy, not the empty tuple.
 from plexus.spec import GoalSpec  # noqa: E402
 
-assert set(GoalSpec.review_hold) == {"spine", "boundary"}
+assert set(GoalSpec.review_hold) == {"spine", "boundary", "exec", "suspect"}
 
 # --- opening the PR never costs the run ------------------------------------
 # Every way this can be unavailable has to return a string, not raise: the goal
