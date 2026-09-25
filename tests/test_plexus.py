@@ -1254,3 +1254,40 @@ def test_a_diff_that_would_run_on_the_host_is_held_whatever_the_plan_said():
         ".claude/settings.json", "tests/unit/conftest.py", "pyproject.toml",
         "web/package.json", ".github/workflows/ci.yml", "lib/evil.pth"]
     assert exec_surface(["src/claude/settings.py", "notes/Makefile.md"]) == []
+
+
+# --- a task that needs no plan gets a one-feature one, approved, and runs ---
+# Before this, `requires_plan: false` produced a task the board called runnable
+# and the runner refused: there was no path that ever wrote its plan file.
+from plexus import plan as _plan, serve as _serve, tasks as _tasks  # noqa: E402
+ap = tmp / "auto-plan-repo"; ap.mkdir()
+(ap / "plexus.toml").write_text(
+    '[goal]\nid="apgoal"\ntext="t"\n[ground_truth]\nsuite="python3 -m pytest -q"\n')
+apspec = load_spec(ap)
+one = _tasks.create(ap, "Rename the badge", body="just the label", requires_plan=False)
+feats = _plan.auto_plan(apspec, ap, one["id"])
+assert [f["id"] for f in feats] == [f"{one['id']}:main"], feats
+assert feats[0]["acceptance"] == "python3 -m pytest -q"
+assert feats[0]["touches"] == []          # nobody chose a file list -> unenforced
+assert _plan.load_plan(ap, one["id"])[0]["title"] == "Rename the badge"
+board = {t["id"]: t for t in _tasks.board(ap)["tasks"]}
+assert board[one["id"]]["state"] == "ready" and board[one["id"]]["plan_id"]
+# approval is per task: the project has no plan at all, the task does
+assert _serve._approved(ap, one["id"]) and not _serve._approved(ap)
+assert _serve._task_board(ap)["tasks"][0]["plan_approved"]
+# no suite means nothing could verify the work, so it refuses rather than
+# running an unplanned task unchecked
+(ap / "plexus.toml").write_text('[goal]\nid="apgoal"\ntext="t"\n[ground_truth]\nsuite=""\n')
+two = _tasks.create(ap, "Second job", requires_plan=False)
+try:
+    _plan.auto_plan(load_spec(ap), ap, two["id"])
+    raise AssertionError("ran with no ground truth")
+except SystemExit as exc:
+    assert "ground_truth" in str(exc), exc
+
+
+# --- recordings read back as lines: a repaint is one line, not two
+from plexus import tap as _tap, translog as _translog  # noqa: E402
+with _c.redirect_stdout(_io.StringIO()):
+    _translog.demo()
+    _tap.demo()

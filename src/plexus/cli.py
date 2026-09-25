@@ -84,6 +84,10 @@ def main(argv: list[str] | None = None) -> int:
                                    "(repo or a parent of several) — like 'Add Folder'")
     s.add_argument("path", help="path to the project or parent directory")
 
+    s = sub.add_parser("remove", help="drop a project directory from the menu "
+                                      "(inverse of `add`); rare, but supported")
+    s.add_argument("path", help="path previously passed to `plexus add`")
+
     s = sub.add_parser("report", help="fleet digest: spend / lead time / escalation "
                                       "rate per goal across the menu")
     s.add_argument("--root", default=".", help="a goal repo, or a parent of several")
@@ -247,6 +251,13 @@ def main(argv: list[str] | None = None) -> int:
               + (f" (package '{pkg}' -> registry)" if pkg else "")
               + (f"; {goals} goal(s) found" if goals else
                  "; no plexus.toml yet — `plexus init` there to add a goal"))
+        return 0
+    if args.cmd == "remove":
+        from . import registry
+        p = Path(args.path).expanduser().resolve()
+        ok = registry.remove_workspace_root(args.path)
+        print(f"removed {p} from the workspace" if ok
+              else f"{p} was not in the workspace")
         return 0
     if args.cmd == "report":
         from . import observe

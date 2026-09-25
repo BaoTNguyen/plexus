@@ -4,6 +4,7 @@ import { useState } from "react";
 import { api } from "../api";
 import { Panel } from "../components/Status";
 import { TerminalView } from "./TerminalView";
+import { TranscriptView } from "./TranscriptView";
 
 /** Build: the 20% of the ratio, in one place.
  *
@@ -68,9 +69,10 @@ export function BuildView({ root, sessionName }: { root: string; sessionName: st
           title={`Transcript · ${transcript}`}
           action={<button className="button button-small" onClick={() => setTranscript(null)}>back to live</button>}
         >
-          {/* raw recording, escape codes and all: it is what the agent's CLI
-              actually printed, not a cleaned-up retelling of it */}
-          <pre className="transcript-output">{text.data?.text ?? "loading…"}</pre>
+          {/* the raw recording, replayed by a terminal rather than dumped into
+              a text box: the file is what the CLI printed, escape codes and
+              all, and only an emulator can turn that back into a screen */}
+          <TranscriptView root={root} name={transcript} text={text.data?.text ?? ""} />
         </Panel>
       ) : (
         <TerminalView root={root} sessionName={sessionName} />

@@ -39,8 +39,8 @@ from urllib.parse import parse_qs, urlparse
 
 from heart.runner import CACHE_MULTIPLIERS, speed_multiplier
 
-from . import diagnose, ledger, observe, overview, registry, review, tasks, term
-from .plan import approve, load_plan
+from . import diagnose, ledger, observe, overview, registry, review, tasks, term, translog
+from .plan import approve, auto_plan, load_plan
 from .run import _feature_state, _open_pr
 from .spec import load_spec
 
@@ -91,6 +91,35 @@ def menu_roots(base: Path) -> list[Path]:
     return sorted(roots)
 
 
+def _scope_roots(base: Path) -> list[Path]:
+    """Every top-level registered root — the CLI/serve `--root` plus each
+    `plexus add`ed workspace root, deduped. Each one is a *scope*."""
+    seen = {base.resolve()}
+    out = [base.resolve()]
+    for w in registry.workspace_roots():
+        w = w.resolve()
+        if w not in seen:
+            seen.add(w)
+            out.append(w)
+    return out
+
+
+def _goal_scope_map(base: Path) -> dict[str, Path]:
+    """goal root (str) -> its scope root: the most specific registered root that
+    contains it. `_scan_roots` expands a scope root into 1 goal (added as a
+    single repo) or several (a parent directory holding a whole stack, e.g.
+    `plexus serve --root ~/Projects` over five sibling repos) — this is what
+    turns "five unrelated single-repo scopes" into "one five-repo scope" the
+    way the sidebar is meant to read. Sorted shortest-first so a more specific
+    root registered on top of a broader one (added individually in addition to
+    its parent) wins the assignment."""
+    mapping: dict[str, Path] = {}
+    for scope_root in sorted(_scope_roots(base), key=lambda p: len(str(p))):
+        for goal in _scan_roots(scope_root):
+            mapping[str(goal)] = scope_root
+    return mapping
+
+
 def _goal_id(root: Path) -> str:
     try:
         return load_spec(root).goal_id
@@ -104,9 +133,12 @@ def _project_id(root: Path) -> str:
     return hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:16]
 
 
-def _current_plan(root: Path) -> tuple[str, list[dict]]:
+def _current_plan(root: Path, task_id: str = "") -> tuple[str, list[dict]]:
+    """The plan in force. With a task, *its* plan — a task carries its own
+    feature list, and checking the project-level plan instead is how a planned
+    task ended up refused as "not approved" with its own approval on file."""
     try:
-        plan = load_plan(root)
+        plan = load_plan(root, task_id)
     except SystemExit:
         return "", []
     return (str(plan[0].get("plan_id", "")), plan) if plan else ("", [])
@@ -434,27 +466,56 @@ def _term_name(root: Path, roots: list[Path]) -> str:
     return f"plexus-{base}"
 
 
-def _list_goals(roots: list[Path]) -> list[dict]:
+#: internal state -> what it means to someone reading the sidebar
+_STATUS_WORDS = {"intake": "not set up", "draft": "not planned",
+                 "plan_failed": "plan failed", "awaiting_approval": "needs approval"}
+
+
+def _list_goals(roots: list[Path], base: Path | None = None) -> list[dict]:
+    """`base=None` (report/CLI callers, self-checks) leaves every goal its own
+    scope, matching behavior before scopes existed — only the live dashboard
+    passes `base` and gets the auto-grouped-by-registered-root scope fields."""
     meta = registry.project_meta()
+    scope_map = _goal_scope_map(base) if base is not None else {}
     out = []
     for root in roots:
         lines, code = observe.status(str(root))
         lifecycle = _goal_lifecycle(root)
         m = meta.get(str(root)) or meta.get(str(Path(root).resolve())) or {}
         goal_id = _goal_id(root)
-        status = lifecycle["state"].replace("_", " ").upper()
-        if goal_id != "my-goal":
-            status += f"  {goal_id}"
+        # the sidebar line is read by a person, so it says what the state
+        # means rather than what the enum is called
+        status = _STATUS_WORDS.get(lifecycle["state"],
+                                   lifecycle["state"].replace("_", " ")).upper()
         if lifecycle["state"] not in ("intake", "clarify", "draft", "planning", "plan_failed",
                                       "awaiting_approval", "ready"):
             status = lines[0] if lines else status
+        scope_root = scope_map.get(str(root), root)
         out.append({"root": str(root), "name": root.name, "goal_id": goal_id,
                     "project_id": _project_id(root),
+                    "scope_id": _project_id(scope_root), "scope_name": scope_root.name,
                     "goal_state": lifecycle["state"], "status": status,
                     "code": code, "running": _running(root),
                     "label": m.get("label", ""), "pinned": bool(m.get("pinned")),
                     "term_session": _term_name(root, roots)})
     return out
+
+
+def _task_board(root: Path) -> dict:
+    """`tasks.group` plus whether each task's own plan has been approved.
+
+    The board is the only place the question gets asked, and asking it per task
+    through `_approved` would re-read the ledger once per row. One read, one
+    set of approved plan ids, every row answered from it.
+    """
+    board = tasks.group(root)
+    goal_id = _goal_id(root)
+    approved = {r.get("plan_id") for r in ledger.read(root)
+                if r.get("kind") == "plan.approved" and r.get("goal_id") == goal_id}
+    # the bucket lists hold the same dicts as board["tasks"], so one pass does
+    for row in board["tasks"]:
+        row["plan_approved"] = bool(row.get("plan_id")) and row["plan_id"] in approved
+    return board
 
 
 def _goal_detail(root: Path) -> dict:
@@ -641,13 +702,45 @@ def _episode_detail(root: Path, episode_id: str) -> dict | None:
             "steps": steps, "memory": memory, "route": route, "verify": verify}
 
 
-def _dashboard(roots: list[Path], window_h: float = 24.0) -> dict:
+def _scope_episodes(roots: list[Path], label: str = "", scope_id: str = "",
+                    limit: int = 50, base: Path | None = None) -> list[dict]:
+    """Recent episodes across every repo in one scope — the sidebar's per-scope
+    episode feed, merged and newest-first the way _dashboard already merges
+    episodes fleet-wide, just narrowed to one scope instead of all of them.
+
+    Two ways a scope is formed, so two ways to match it: an explicit `label`
+    (repos the user tagged together by hand) beats `scope_id` (repos the
+    registered-root scan grouped automatically, e.g. `plexus serve --root
+    ~/Projects` over a whole stack) — mirroring the sidebar's own priority.
+
+    ponytail: pulls `limit` per repo before merging, so a scope with many
+    repos can undercount slightly at the tail; raise per-repo pull if that bites."""
+    if label:
+        meta = registry.project_meta()
+        matching = [r for r in roots
+                    if (meta.get(str(r)) or meta.get(str(r.resolve())) or {}).get("label", "") == label]
+    elif scope_id and base is not None:
+        scope_map = _goal_scope_map(base)
+        matching = [r for r in roots
+                    if _project_id(scope_map.get(str(r), r)) == scope_id]
+    else:
+        matching = []
+    episodes = []
+    for root in matching:
+        episodes.extend({**e, "project_id": _project_id(root), "goal_id": _goal_id(root),
+                         "project_name": root.name}
+                        for e in _episodes(root, limit))
+    episodes.sort(key=lambda e: e.get("started", ""), reverse=True)
+    return episodes[:limit]
+
+
+def _dashboard(roots: list[Path], window_h: float = 24.0, base: Path | None = None) -> dict:
     now = datetime.datetime.now(datetime.timezone.utc)
     # window_h 0 means all time. An empty cutoff sorts below every ISO
     # timestamp, so every `ts >= cutoff` filter below keeps working unchanged.
     cutoff = "" if not window_h else (now - datetime.timedelta(hours=window_h)).isoformat()
     cutoff_7d = (now - datetime.timedelta(days=7)).isoformat()
-    projects = _list_goals(roots)
+    projects = _list_goals(roots, base)
     alerts = []
     plexus_spend_24h = plexus_spend_7d = 0.0
     landed_24h = landed_7d = tokens_in = tokens_out = 0
@@ -1077,9 +1170,9 @@ def _spawn(root: Path, *args: str, local_slots: int = 0,
     return True
 
 
-def _approved(root: Path) -> bool:
+def _approved(root: Path, task_id: str = "") -> bool:
     try:
-        plan_id, _ = _current_plan(root)
+        plan_id, _ = _current_plan(root, task_id)
         return _plan_approved(ledger.read(root), _goal_id(root), plan_id)
     except Exception:
         return False
@@ -1398,7 +1491,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "not found"}, 404)
             self._static(asset)
         elif u.path == "/api/goals":
-            self._json(_list_goals(self.server.roots))
+            self._json(_list_goals(self.server.roots, self.server.base))
         elif u.path == "/api/dashboard":
             try:
                 # 0 is all time; anything else clamps to [1h, 1 year]
@@ -1406,7 +1499,7 @@ class _Handler(BaseHTTPRequestHandler):
                 window_h = 0.0 if requested <= 0 else max(1.0, min(requested, 24 * 366))
             except ValueError:
                 return self._json({"error": "invalid window_h"}, 400)
-            self._json(_dashboard(self.server.roots, window_h))
+            self._json(_dashboard(self.server.roots, window_h, self.server.base))
         elif u.path == "/api/fleet":
             self._json(_fleet_state(self.server))
         elif u.path == "/api/accounting":
@@ -1441,6 +1534,14 @@ class _Handler(BaseHTTPRequestHandler):
             except ValueError:
                 return self._json({"error": "invalid limit"}, 400)
             self._json(_episodes(root, limit))
+        elif u.path == "/api/scope-episodes":
+            label = qs.get("label", [""])[0]
+            scope_id = qs.get("scope_id", [""])[0]
+            try:
+                limit = max(1, min(int(qs.get("limit", ["50"])[0]), 200))
+            except ValueError:
+                return self._json({"error": "invalid limit"}, 400)
+            self._json(_scope_episodes(self.server.roots, label, scope_id, limit, self.server.base))
         elif u.path == "/api/episode":
             root = self._root(qs)
             if not self._allowed_root(root):
@@ -1479,7 +1580,7 @@ class _Handler(BaseHTTPRequestHandler):
             root = self._root(qs)
             if not self._allowed_root(root):
                 return self._json({"error": "unknown root"}, 403)
-            self._json(tasks.group(root))
+            self._json(_task_board(root))
         elif u.path == "/api/term/sessions":
             root = self._root(qs)
             if not self._allowed_root(root):
@@ -1504,6 +1605,11 @@ class _Handler(BaseHTTPRequestHandler):
             path = Path(root) / ".plexus" / "transcripts" / name
             if not name or not path.is_file():
                 return self._json({"error": "no such transcript"}, 404)
+            if qs.get("format", [""])[0] == "lines":
+                # the same recording, replayed through a screen and handed back
+                # a line at a time. The file is never rewritten — this is a
+                # reader, and the bytes stay the record.
+                return self._json({"name": name, "lines": translog.lines(path)})
             self._json({"name": name, "text": _log_tail(path, 400_000)})
         else:
             self._json({"error": "not found"}, 404)
@@ -1537,6 +1643,14 @@ class _Handler(BaseHTTPRequestHandler):
             if not path.is_dir():
                 return self._json({"error": f"not a directory: {path}"}, 400)
             registry.add_workspace_root(path)
+            self.server.roots = menu_roots(self.server.base)
+            return self._json({"roots": [str(r) for r in self.server.roots]})
+        if u.path == "/api/remove":
+            # inverse of /api/add — 'remove repo from workspace'. Rare, but the
+            # left rail needs a way to undo a mis-added or retired repo without
+            # hand-editing workspace.json.
+            path = Path(data.get("path", "")).expanduser()
+            registry.remove_workspace_root(path)
             self.server.roots = menu_roots(self.server.base)
             return self._json({"roots": [str(r) for r in self.server.roots]})
         if u.path == "/api/project":
@@ -1581,7 +1695,7 @@ class _Handler(BaseHTTPRequestHandler):
                         source_url=str(data.get("source_url", "")),
                         blocked_by=list(data.get("blocked_by") or []),
                         requires_plan=bool(data.get("requires_plan", True)))
-                return self._json(tasks.group(root))
+                return self._json(_task_board(root))
             elif u.path == "/api/term/close":
                 return self._json({"ok": term.kill(
                     self._term_view(root, str(data.get("view", ""))))})
@@ -1614,10 +1728,14 @@ class _Handler(BaseHTTPRequestHandler):
                 brief = root / ".plexus" / f"discuss-{view}.md"
                 brief.parent.mkdir(parents=True, exist_ok=True)
                 brief.write_text(prompt, encoding="utf-8")
+                stamp = datetime.datetime.now().strftime("%H%M%S")
                 started = term.start(
                     name, root, spec.agent,
                     f"Read {brief} and follow it.",
-                    _run_env(self.server.local_slots, self.server.global_agents))
+                    _run_env(self.server.local_slots, self.server.global_agents),
+                    # a conversation decides what gets built; it belongs in the
+                    # same append-only recording a run gets, not in scrollback
+                    transcript=root / ".plexus" / "transcripts" / f"{view}-{stamp}.log")
                 if not started:
                     return self._json({"error": "could not open a session"}, 500)
                 return self._json({"ok": True, "session": name, "rejoined": False})
@@ -1645,7 +1763,7 @@ class _Handler(BaseHTTPRequestHandler):
                 tasks.create(root, issue["source_title"] or issue["goal_id"],
                              body=issue["source_body"],
                              source_kind="github", source_url=issue["source_url"])
-                return self._json(tasks.group(root))
+                return self._json(_task_board(root))
             elif u.path == "/api/term/select":
                 if not term.available():
                     return self._json({"error": "tmux not installed"}, 503)
@@ -1665,15 +1783,29 @@ class _Handler(BaseHTTPRequestHandler):
                                  global_agents=self.server.global_agents,
                                  roots=self.server.roots)
                 if not started:
+                    # Put the task back. A refused spawn used to leave it in
+                    # `planning` forever, and `next_task` treats anything in
+                    # flight as a reason to start nothing — one rejected click
+                    # silently froze the whole queue.
+                    if task_id:
+                        tasks.update(root, task_id, state="open")
                     return self._json({"error": "a plan or run job is already active"}, 409)
                 return self._json({"ok": True, "state": "planning"})
             elif u.path == "/api/approve":
                 approve(load_spec(root), root, waive=data.get("waive", False),
                         task_id=str(data.get("task", "")))
             elif u.path == "/api/run":
-                if not _approved(root):
-                    return self._json({"error": "the current plan is not approved"}, 409)
                 task_id = str(data.get("task", ""))
+                task = next((t for t in tasks.read(root) if t["id"] == task_id), None) \
+                    if task_id else None
+                # A task you marked as needing no plan gets a one-feature plan
+                # written from itself, approved on the spot. Before this it was
+                # shown as runnable and then died in a tmux window on "no plan
+                # for task" — the half of `requires_plan` that was never built.
+                if task and not task.get("plan_id") and not task.get("requires_plan"):
+                    auto_plan(load_spec(root), root, task_id)
+                if not _approved(root, task_id):
+                    return self._json({"error": "the current plan is not approved"}, 409)
                 started = _spawn(
                     root, "run", "--candidates", str(data.get("candidates", 1)),
                     *(["--task", task_id] if task_id else []),
@@ -2051,6 +2183,29 @@ def demo() -> None:
         finally:
             os.environ.pop("PLEXUS_WORKSPACE", None) if old_ws is None \
                 else os.environ.__setitem__("PLEXUS_WORKSPACE", old_ws)
+
+        # scope grouping: a registered root that's a parent of several repos
+        # becomes one scope (e.g. `plexus serve --root ~/Projects` over a whole
+        # stack); a root added on its own is a scope of one, keyed to itself.
+        old_ws2 = os.environ.get("PLEXUS_WORKSPACE")
+        os.environ["PLEXUS_WORKSPACE"] = str(root / "ws-empty.json")
+        try:
+            stack = root / "stack"
+            for name in ("a", "b"):
+                (stack / name).mkdir(parents=True)
+                (stack / name / "plexus.toml").write_text(
+                    f'[goal]\nid="{name}"\ntext="t"\n[ground_truth]\nsuite="true"\n')
+            a, b = (stack / "a").resolve(), (stack / "b").resolve()
+            scope_map = _goal_scope_map(stack)
+            assert scope_map[str(a)] == scope_map[str(b)] == stack.resolve(), scope_map
+            listed = _list_goals([a, b], stack)
+            assert listed[0]["scope_id"] == listed[1]["scope_id"], listed
+            assert listed[0]["scope_name"] == "stack", listed
+            solo = _list_goals([draft_root], draft_root)[0]
+            assert solo["scope_id"] == _project_id(draft_root.resolve()), solo
+        finally:
+            os.environ.pop("PLEXUS_WORKSPACE", None) if old_ws2 is None \
+                else os.environ.__setitem__("PLEXUS_WORKSPACE", old_ws2)
 
         # live view: spine events filtered to this goal's lineage, both paths
         # (task_id prefix and payload.goal_id), isolated journal

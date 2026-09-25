@@ -307,6 +307,48 @@ def make_plan(spec, root: str | Path = ".", task_id: str = "") -> list[dict]:
     return feats
 
 
+def auto_plan(spec, root: str | Path = ".", task_id: str = "") -> list[dict]:
+    """The plan for a task you said needed no planning: one feature, taken from
+    the task itself, verified by the project's suite.
+
+    No agent turn. There is nothing to decompose, and paying a model to restate
+    a one-line task as a one-line feature buys nothing but latency. `touches`
+    stays empty — nobody decided a file list, and `_stray_paths` reads an empty
+    list as unenforced rather than as "touch nothing". Approval is recorded
+    here because unchecking "needs a plan" *is* the approval: there is no
+    decomposition left for a human to review.
+    """
+    root = Path(root)
+    task = next((t for t in _tasks.read(root) if t["id"] == task_id), None)
+    if task is None:
+        raise SystemExit(f"no task {task_id!r}")
+    if not (spec.suite or "").strip():
+        raise SystemExit(
+            "no [ground_truth] suite in plexus.toml — an unplanned task has "
+            "nothing to verify it, so it will not run unverified")
+    body = (task.get("body") or "").strip()
+    feat = {
+        "id": f"{task_id}:main", "title": task["title"],
+        "spec": f"{task['title']}\n\n{body}".strip(),
+        "acceptance": spec.suite, "touches": [], "contract": [],
+        "depends_on": [], "needs_upstream": [], "skills": [], "manual_checks": [],
+        "priority": 0, "difficulty": "unknown", "effort": "",
+    }
+    plan_id = "auto-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = plan_path(root, task_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"plan_id": plan_id, "task_id": task_id, **feat}) + "\n")
+    _tasks.update(root, task_id, plan_id=plan_id, state="ready", error="")
+    ledger.record("plan.created", goal_id=spec.goal_id, root=root, plan_id=plan_id,
+                  task=task_id, spec_hash=spec.spec_hash, auto=True,
+                  features=[{"feature_id": feat["id"], "title": feat["title"],
+                             "acceptance": feat["acceptance"]}], rejected=[])
+    ledger.record("plan.approved", goal_id=spec.goal_id, root=root, plan_id=plan_id,
+                  task=task_id, approver="auto:unplanned-task", waived=[])
+    return [feat]
+
+
 def load_plan(root: str | Path = ".", task_id: str = "") -> list[dict]:
     p = plan_path(root, task_id)
     if not p.exists() and task_id:

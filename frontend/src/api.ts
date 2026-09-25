@@ -10,6 +10,7 @@ import type {
   TaskBoard,
   TermSessions,
   TermWindows,
+  TranscriptLine,
   Validation,
 } from "./types";
 
@@ -37,6 +38,12 @@ export const api = {
     request<GoalDetail>(`/api/goal?root=${encodeURIComponent(root)}`),
   episodes: (root: string) =>
     request<Episode[]>(`/api/episodes?root=${encodeURIComponent(root)}&limit=100`),
+  scopeEpisodes: (query: { label?: string; scope_id?: string }, limit = 50) => {
+    const qs = new URLSearchParams({ limit: String(limit) });
+    if (query.label) qs.set("label", query.label);
+    if (query.scope_id) qs.set("scope_id", query.scope_id);
+    return request<Episode[]>(`/api/scope-episodes?${qs.toString()}`);
+  },
   episode: (root: string, id: string) =>
     request<EpisodeDetail>(
       `/api/episode?root=${encodeURIComponent(root)}&id=${encodeURIComponent(id)}`,
@@ -52,6 +59,12 @@ export const api = {
   termTranscript: (root: string, name: string) =>
     request<{ name: string; text: string }>(
       `/api/term/transcript?root=${encodeURIComponent(root)}&name=${encodeURIComponent(name)}`),
+  /** the same recording, replayed server-side through a screen: one line per
+   *  line, with a time of day when the recording carries timing */
+  termTranscriptLines: (root: string, name: string) =>
+    request<{ name: string; lines: TranscriptLine[] }>(
+      `/api/term/transcript?format=lines&root=${encodeURIComponent(root)}`
+      + `&name=${encodeURIComponent(name)}`),
   post: <T>(path: string, body: Record<string, unknown>) =>
     request<T>(`/api${path}`, {
       method: "POST",
