@@ -26,6 +26,7 @@ import signal
 import struct
 import shutil
 import subprocess
+import sys
 import tempfile
 import termios
 import threading
@@ -296,7 +297,10 @@ def run_window(session: str, cwd: Path, name: str, argv: list[str],
     # part you want when a run dies on startup. -e propagates the child's exit
     # status so the code written below is the command's, not script's.
     if _which("script"):
-        inner = "script -q -e -f -c {} {}".format(
+        # -T records how long the pause before each chunk was, which is the
+        # only way a line of a recording can carry a time of day afterwards.
+        inner = "script -q -e -f -T {} -c {} {}".format(
+            shlex.quote(str(transcript) + ".timing"),
             shlex.quote(f"{prefix} {command}"), shlex.quote(str(transcript)))
     else:
         inner = f"{prefix} {command}"
@@ -359,7 +363,8 @@ def get(name: str, cwd: Path, cols: int = 120, rows: int = 32) -> Session:
 
 
 def start(name: str, cwd: Path, agent: str, opening: str,
-          env: dict[str, str] | None = None) -> bool:
+          env: dict[str, str] | None = None,
+          transcript: Path | None = None) -> bool:
     """Open a detached session running `agent` interactively, then send it
     `opening` as its first message.
 
@@ -389,8 +394,23 @@ def start(name: str, cwd: Path, agent: str, opening: str,
     if made.returncode != 0:
         return False
     configure(name)
+    if transcript is not None:
+        record(name, transcript)
     threading.Thread(target=_send_opening, args=(name, opening), daemon=True).start()
     return True
+
+
+def record(name: str, transcript: Path) -> bool:
+    """Tap a session's output into an append-only recording.
+
+    A conversation decides what gets built, and until this existed it lived
+    only in tmux scrollback — gone the moment the session was closed or the
+    machine rebooted. `-o` makes tmux start the pipe only if one is not already
+    running, so re-attaching does not stack a second recorder on the pane.
+    """
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    tap = f"{shlex.quote(sys.executable)} -m plexus.tap {shlex.quote(str(transcript))}"
+    return _tmux("pipe-pane", "-t", name, "-o", tap).returncode == 0
 
 
 def _send_opening(name: str, opening: str, timeout: float = 25.0) -> None:

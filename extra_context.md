@@ -91,3 +91,66 @@ changing it is expensive rather than merely annoying.
 - Plexus has no persistent arteries memory of its own (0 rows as of today). It
   reads the `harness` scope, so it sees arteries' memory, which is
   arteries-flavored. Don't assume a fresh session here knows plexus's reasoning.
+
+## Deferred: filtering web content before an agent reads it
+
+Written 2026-09-24. Nothing below is built yet. It is kept here so the
+decision can be picked up without re-deriving it.
+
+**The gap.** Web content is already checked before it becomes trusted in two
+places:
+
+- **Code that lands:** tests, the `exec` and `suspect` holds, and the
+  web-briefed reviewer.
+- **Memory:** arteries `trust.py`. Untrusted facts are dropped, merged into an
+  existing trusted fact, or kept for 3 days in their own project only.
+
+It is not checked before it reaches a **build agent's own context**. On the
+`web` lane an agent fetches pages and reads them raw. Whatever a page says acts
+on that agent while it works, with the repo in reach. The operator's idea: web
+content passes a check or filter before it is trusted in the normal workflow.
+
+**Option A: web reader.** A fetch service beside the egress proxy (same
+container, a third port), and the only way build agents reach the web. It:
+
+- strips the hidden text most injections use: HTML comments, `display:none`
+  and off-screen elements, zero-width characters, and alt or aria text used as
+  instructions;
+- returns plain text with a size cap;
+- caps URL length, so data cannot leave in query strings;
+- can optionally have a small model condense each page into facts, so the
+  agent never sees the raw page.
+
+Build agents then leave `*` and get the reader plus the package indexes they
+install from. Search runs through the reader too, or stays as Claude's
+server-side WebSearch, which reaches the agent through the credential injector.
+
+- *Stops:* cheap and hidden injections, bulk exfiltration through URLs, and
+  raw pages in a context that holds the repo.
+- *Doesn't stop:* a determined injection that survives as a plausible "fact".
+  The land-time and memory gates stay the real guarantee.
+
+**Option B: research phase.** The operator's idea. A build agent that needs
+information stops and says what it needs. Plexus runs a short research turn
+(a reader profile via `heart.runner.turn_profile`, on the web lane, with no
+write access), then resumes the feature with the notes in its prompt. Most of
+the parts exist already: the `PLEXUS_BLOCKED` marker, escalation, and resume
+with an answer (`run._resume_answer`).
+
+- *Full value* comes if build agents later move to the `api` lane, so research
+  happens only in research turns.
+- *Until then* it mostly gives research a structure and a record.
+
+**A and B combine:** research turns use the reader, and build agents lose raw
+web access.
+
+**Open questions:**
+
+- Should research notes be marked untrusted when they enter a build prompt, the
+  way arteries marks them?
+- Should a plan built from research be held for review automatically?
+- Which package indexes does a build lane need (PyPI, npm, crates)?
+
+Related: 5f, a fully quarantined research container with no repo, was
+considered and deferred. The per-project sandbox image was declined; projects
+with dependencies run with `HEART_SANDBOX=off` for now.

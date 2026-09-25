@@ -13,7 +13,8 @@ import subprocess
 from pathlib import Path
 
 from heart.env import Workspace
-from heart.runner import run_agent
+from heart.runner import SANDBOX_MODE, run_agent, run_contained, turn_profile
+from heart.taskspec import TaskSpec
 
 from . import ledger
 from . import overview as _overview
@@ -183,6 +184,35 @@ def execution_order(feats: list[dict]) -> list[dict]:
     return ordered
 
 
+def _retrieved(root: str | Path, prompt: str, lane: str = "") -> str:
+    """What the repo's own prompt hook would have added, fetched on the host.
+
+    On the host the planner's retrieval arrives through the UserPromptSubmit
+    hook in the checkout's gitignored .claude/settings.local.json, which calls
+    .arteries/hooks/hook-observe.sh by absolute host path. Neither exists inside
+    a container, so a contained planner would plan with no memory and nothing
+    would say so. Running the same hook here, with the same prompt, gives the
+    same gate and the same packet -- and records the turn, as the hook would.
+
+    Never raises: a planner without memory is worse, not broken.
+    """
+    hook = Path(root) / ".arteries" / "hooks" / "hook-observe.sh"
+    if not hook.is_file():
+        return ""
+    try:
+        r = subprocess.run(["bash", str(hook)], input=json.dumps(
+                               {"prompt": prompt, "cwd": str(Path(root).resolve()),
+                                "hook_event_name": "UserPromptSubmit"}),
+                           capture_output=True, text=True, timeout=30,
+                           env={**os.environ, "ARTERIES_CLI": "claude",
+                                # retrieved for an agent, on the goal's lane:
+                                # see arteries trust.py for what each admits
+                                "ARTERIES_TRUST": "untrusted", "ARTERIES_LANE": lane})
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return r.stdout.strip() + "\n\n" if r.returncode == 0 and r.stdout.strip() else ""
+
+
 def make_plan(spec, root: str | Path = ".", task_id: str = "") -> list[dict]:
     out = Path(root) / ".plexus"
     out.mkdir(parents=True, exist_ok=True)
@@ -216,17 +246,40 @@ def make_plan(spec, root: str | Path = ".", task_id: str = "") -> list[dict]:
     attempts = max(1, int(os.getenv("PLEXUS_PLAN_ATTEMPTS", "3")))
     feats = None
     last_err = ""
-    for i in range(attempts):
-        res = run_agent(spec.agent, prompt, cwd=str(root), extra_env={},
-                        timeout=spec.timeout, log_path=log, agent_cmd=spec.agent_cmd)
-        if res["exit_code"] != 0:
-            last_err = f"planner agent failed (exit {res['exit_code']})"
-            continue
-        try:
-            feats = _parse_features(log.read_text(encoding="utf-8", errors="replace"))
-            break
-        except (ValueError, json.JSONDecodeError) as exc:
-            last_err = f"planner output unparseable: {exc}"
+    # Under HEART_SANDBOX the planner is a reader: a container over a worktree of
+    # HEAD, with the goal's network so research can shape the plan, and no way
+    # to write. On the host it read the checkout -- uncommitted files included --
+    # with --dangerously-skip-permissions, the one planning turn that never saw
+    # a sandbox whatever the operator asked for.
+    ws = profile = None
+    cwd = str(root)
+    if os.environ.get("HEART_SANDBOX") == SANDBOX_MODE:
+        head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                              capture_output=True, text=True, check=True).stdout.strip()
+        ws = Workspace(str(root), head)
+        cwd = str(ws.path)
+        key = f"{spec.goal_id}-{task_id or 'goal'}-plan"
+        profile = turn_profile(
+            TaskSpec(task_id=key, repo_path=str(Path(root).resolve()), base_commit=head,
+                     prompt=prompt, timeout_seconds=spec.timeout, network=spec.network),
+            ws.path, out / "plan", key)
+        prompt = _retrieved(root, prompt, spec.network) + prompt
+    try:
+        for i in range(attempts):
+            res = run_agent(spec.agent, prompt, cwd=cwd, extra_env={},
+                            timeout=spec.timeout, log_path=log, agent_cmd=spec.agent_cmd,
+                            profile=profile)
+            if res["exit_code"] != 0:
+                last_err = f"planner agent failed (exit {res['exit_code']})"
+                continue
+            try:
+                feats = _parse_features(log.read_text(encoding="utf-8", errors="replace"))
+                break
+            except (ValueError, json.JSONDecodeError) as exc:
+                last_err = f"planner output unparseable: {exc}"
+    finally:
+        if ws is not None:
+            ws.destroy()
     if feats is None:
         raise SystemExit(f"{last_err} after {attempts} attempt(s); see {log}")
     plan_id = "plan-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -252,6 +305,48 @@ def make_plan(spec, root: str | Path = ".", task_id: str = "") -> list[dict]:
         rejected=[],  # populated once the planner runs best-of-N
     )
     return feats
+
+
+def auto_plan(spec, root: str | Path = ".", task_id: str = "") -> list[dict]:
+    """The plan for a task you said needed no planning: one feature, taken from
+    the task itself, verified by the project's suite.
+
+    No agent turn. There is nothing to decompose, and paying a model to restate
+    a one-line task as a one-line feature buys nothing but latency. `touches`
+    stays empty — nobody decided a file list, and `_stray_paths` reads an empty
+    list as unenforced rather than as "touch nothing". Approval is recorded
+    here because unchecking "needs a plan" *is* the approval: there is no
+    decomposition left for a human to review.
+    """
+    root = Path(root)
+    task = next((t for t in _tasks.read(root) if t["id"] == task_id), None)
+    if task is None:
+        raise SystemExit(f"no task {task_id!r}")
+    if not (spec.suite or "").strip():
+        raise SystemExit(
+            "no [ground_truth] suite in plexus.toml — an unplanned task has "
+            "nothing to verify it, so it will not run unverified")
+    body = (task.get("body") or "").strip()
+    feat = {
+        "id": f"{task_id}:main", "title": task["title"],
+        "spec": f"{task['title']}\n\n{body}".strip(),
+        "acceptance": spec.suite, "touches": [], "contract": [],
+        "depends_on": [], "needs_upstream": [], "skills": [], "manual_checks": [],
+        "priority": 0, "difficulty": "unknown", "effort": "",
+    }
+    plan_id = "auto-" + datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    target = plan_path(root, task_id)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"plan_id": plan_id, "task_id": task_id, **feat}) + "\n")
+    _tasks.update(root, task_id, plan_id=plan_id, state="ready", error="")
+    ledger.record("plan.created", goal_id=spec.goal_id, root=root, plan_id=plan_id,
+                  task=task_id, spec_hash=spec.spec_hash, auto=True,
+                  features=[{"feature_id": feat["id"], "title": feat["title"],
+                             "acceptance": feat["acceptance"]}], rejected=[])
+    ledger.record("plan.approved", goal_id=spec.goal_id, root=root, plan_id=plan_id,
+                  task=task_id, approver="auto:unplanned-task", waived=[])
+    return [feat]
 
 
 def load_plan(root: str | Path = ".", task_id: str = "") -> list[dict]:
@@ -281,8 +376,9 @@ def check_criteria(spec, root: str | Path = ".", task_id: str = "") -> list[tupl
     for feat in load_plan(root, task_id):
         ws = Workspace(str(root), base)
         try:
-            r = subprocess.run(feat["acceptance"], shell=True, cwd=str(ws.path),
-                               capture_output=True, text=True, timeout=spec.timeout)
+            # planner-authored: a model wrote this command, so it runs contained
+            r = run_contained(feat["acceptance"], str(ws.path), spec.timeout,
+                              writable=True)
         except subprocess.TimeoutExpired:
             bad.append((feat["id"], "acceptance command hung on the base commit"))
             continue

@@ -109,7 +109,7 @@ export function DashboardPage() {
               <Link
                 key={`${alert.project_id}-${alert.feature_id}-${index}`}
                 to="/p/$projectId/$tab"
-                params={{ projectId: alert.project_id, tab: "blocks" }}
+                params={{ projectId: alert.project_id, tab: "tasks" }}
                 className="alert-row"
               >
                 <AlertTriangle size={15} />
@@ -269,7 +269,7 @@ export function DashboardPage() {
               return (
                 <Link
                   to="/p/$projectId/$tab"
-                  params={{ projectId: project.project_id, tab: "activity" }}
+                  params={{ projectId: project.project_id, tab: "runs" }}
                   className="spend-row"
                   key={project.project_id}
                 >

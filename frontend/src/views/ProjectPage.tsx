@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import { Pause, Play } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { rememberTab } from "../lastTab";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { api } from "../api";
 import { Panel, StatusBadge, TierBadge } from "../components/Status";
@@ -225,6 +226,10 @@ export function ProjectPage() {
     enabled: Boolean(goal),
     refetchInterval: 5_000,
   });
+  // remember where you were in this project; the sidebar links back to it
+  useEffect(() => {
+    if (tabs.includes(tab as typeof tabs[number])) rememberTab(projectId, tab);
+  }, [projectId, tab]);
   if (goals.isLoading) return <div className="loading-grid" />;
   if (!goal) return <div className="empty">Unknown project.</div>;
   // no tmux on this host means no persistent shell, so the tab is not offered.
@@ -236,9 +241,12 @@ export function ProjectPage() {
     <div className="page">
       <div className="project-heading">
         <div>
-          <p className="eyebrow">{goal.root}</p>
-          <h1>{goal.name}</h1>
-          <span>{goal.goal_id} · {(detail.data?.lifecycle.state || goal.goal_state).replaceAll("_", " ")}</span>
+          {/* the path is on the title as a tooltip, not across the header: you
+              know which repo you opened, and it was the widest thing on screen */}
+          <h1 title={goal.root}>{goal.name}</h1>
+          {/* the goal id only earns a line when it says something the title
+              does not — in most repos the two are the same word twice */}
+          {goal.goal_id !== goal.name && <span>{goal.goal_id}</span>}
         </div>
         <StatusBadge state={detail.data?.lifecycle.state || goal.goal_state} />
       </div>
