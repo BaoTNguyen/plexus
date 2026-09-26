@@ -16,6 +16,11 @@ name = "heart"
 version = "0.1.0"
 source = { editable = "../heart" }
 
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.0" }]
+
 [[package]]
 name = "iniconfig"
 version = "2.3.0"
