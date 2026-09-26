@@ -10,7 +10,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: plexus
 
@@ -22,23 +22,22 @@ jobs:
       # heart's dev. That is the cross-repo slice order expressed as a gate —
       # a plexus change that needs an unlanded heart change goes green on dev
       # and red on the PR, which is exactly when you want to hear about it.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: BaoTNguyen/heart
           ref: ${{ github.base_ref == 'main' && 'main' || 'dev' }}
           path: heart
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v10.2.0   # no floating major tags after v7
         with:
           python-version: '3.12'
 
-      - run: pip install pytest
-
+      # heart comes from ../heart through [tool.uv.sources], exactly as in a
+      # local checkout. Not --locked: uv.lock records heart's metadata.
       - name: suite
         working-directory: plexus
-        env:
-          PYTHONPATH: ${{ github.workspace }}/heart/src:${{ github.workspace }}/plexus/src
         run: |
-          python -m pytest -q
-          python tests/test_plexus.py
-          python tests/test_review.py
+          uv sync
+          uv run pytest -q
+          uv run python tests/test_plexus.py
+          uv run python tests/test_review.py

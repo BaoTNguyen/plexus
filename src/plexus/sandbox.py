@@ -280,7 +280,7 @@ def toolchain(root: str = ".", fix: bool = False) -> list[str]:
 
         say("heart: importable")
     except Exception:
-        say("heart: NOT importable -- `uv pip install -e ../heart` (plexus dispatches through it)")
+        say("heart: NOT importable -- clone it to ../heart and `uv sync` (plexus dispatches through it)")
 
     say("plexus.toml: ok" if (r / "plexus.toml").exists()
         else "plexus.toml: missing -- run `plexus init`")
