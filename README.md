@@ -49,6 +49,19 @@ running:
   plan outcomes become a trainable signal — all keyed by task_id for marrow, as a
   byproduct of running.
 
+## Install
+
+plexus needs [heart](https://github.com/BaoTNguyen/heart) checked out beside it.
+Neither is on PyPI. The easiest route is the whole stack at once:
+`git clone --recursive https://github.com/BaoTNguyen/vascular`. On its own:
+
+```bash
+git clone https://github.com/BaoTNguyen/heart
+git clone https://github.com/BaoTNguyen/plexus && cd plexus
+uv sync && uv run pytest -q          # or: pip install -e ../heart -e . pytest
+uv run plexus doctor                 # what this box still needs to run agents
+```
+
 ## plexus vs heart — the boundary
 
 Both orchestrate agents, so the line must be sharp or the repos bleed into
