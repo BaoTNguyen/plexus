@@ -2,7 +2,7 @@
 name = "plexus"
 version = "0.1.0"
 description = "Goal decomposition + acceptance loop on top of heart/arteries/capillaries"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 
 [project.scripts]
 plexus = "plexus.cli:main"
