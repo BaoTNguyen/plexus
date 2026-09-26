@@ -58,8 +58,9 @@ Neither is on PyPI. The easiest route is the whole stack at once:
 ```bash
 git clone https://github.com/BaoTNguyen/heart
 git clone https://github.com/BaoTNguyen/plexus && cd plexus
-uv sync && uv run pytest -q          # or: pip install -e ../heart -e . pytest
-uv run plexus doctor                 # what this box still needs to run agents
+uv sync && uv run pytest -q
+uv tool install --editable . --with-editable ../heart   # `plexus` on your PATH, for any repo
+plexus doctor                        # what this box still needs to run agents
 ```
 
 ## plexus vs heart — the boundary
@@ -160,7 +161,7 @@ against heart's flags before being built here.
 ## Contract consumed: heart as a library
 
 Marrow set the precedent; plexus follows it. Heart is stdlib-only, so
-`pip install -e ../heart` is the whole dependency story:
+heart at `../heart` (declared as a uv path source) is the whole dependency story:
 
 ```python
 from heart.taskspec import TaskSpec, Verifier
@@ -532,7 +533,7 @@ tests/test_plexus.py    self-check: python3 tests/test_plexus.py (stdlib, no net
 tests/test_review.py    self-check for the scope gate and the conformance report
 ```
 
-Install mirrors marrow: `pip install -e ../heart && pip install -e .`.
+Install mirrors marrow: heart at `../heart`, then `uv sync`.
 
 ## Marrow and the self-improvement flywheel
 
