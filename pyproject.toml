@@ -21,8 +21,7 @@ plexus = ["static/*", "static/assets/*"]
 # it) but isn't on PyPI, so the bare name would resolve to a stranger's package.
 # Same arrangement as arteries -> capillaries: declared in the default uv group
 # and pinned to the sibling checkout, which is where it sits in a standalone
-# clone and in the vascular umbrella alike. Without uv:
-#   pip install -e ../heart && pip install -e .
+# clone and in the vascular umbrella alike.
 [dependency-groups]
 dev = [
     "heart",
