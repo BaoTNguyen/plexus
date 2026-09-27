@@ -362,10 +362,46 @@ def get(name: str, cwd: Path, cols: int = 120, rows: int = 32) -> Session:
         return session
 
 
-def start(name: str, cwd: Path, agent: str, opening: str,
+#: CLIs that can hold an interactive conversation, and the flag each takes to
+#: pin a model. heart's own table is for one-shot turns (`-p`), so it cannot be
+#: reused here -- a conversation is the opposite invocation.
+_CLI_MODEL_FLAG = {"claude": "--model", "codex": "--model",
+                   "gemini": "--model", "opencode": "--model"}
+
+
+def session_argv(agent: str) -> list[str]:
+    """A heart agent string -> argv for an interactive session.
+
+    `claude:opus5` has to become `claude --model claude-opus-5`: the colon form
+    is heart's, not a command, and running it verbatim looks for a binary of
+    that name. "auto" cannot be routed without a task, and a conversation with a
+    human is the hardest turn there is, so it takes the top tier.
+
+    An agent that has no conversational CLI (`api:*`, `shell`) comes back as its
+    own family, so the failure names what isn't a CLI instead of silently
+    launching something else.
+    """
+    if agent == "auto":
+        try:
+            from heart.routing import resolve
+            agent = resolve("frontier", default="claude")
+        except Exception:
+            agent = "claude"
+    base, _, profile = agent.partition(":")
+    if not profile or base not in _CLI_MODEL_FLAG:
+        return [base or agent]
+    try:
+        from heart.runner import resolve_model
+        model = resolve_model(profile)
+    except Exception:
+        model = profile
+    return [base, _CLI_MODEL_FLAG[base], model]
+
+
+def start(name: str, cwd: Path, argv: list[str], opening: str,
           env: dict[str, str] | None = None,
           transcript: Path | None = None) -> bool:
-    """Open a detached session running `agent` interactively, then send it
+    """Open a detached session running `argv` interactively, then send it
     `opening` as its first message.
 
     The agent is launched with no arguments on purpose. Passing the prompt as
@@ -389,7 +425,8 @@ def start(name: str, cwd: Path, agent: str, opening: str,
               if passed else "")
     # a shell after the agent, so quitting it leaves you in the repo rather
     # than destroying the session you were reading
-    inner = f"{prefix} {shlex.quote(agent)}".strip() + '; exec "${SHELL:-/bin/bash}"'
+    inner = (f"{prefix} " + " ".join(shlex.quote(a) for a in argv)).strip() \
+        + '; exec "${SHELL:-/bin/bash}"'
     made = _tmux("new-session", "-d", "-s", name, "-c", str(cwd), "sh", "-c", inner)
     if made.returncode != 0:
         return False
@@ -632,10 +669,17 @@ def demo() -> None:
 
             # a drafting session: starts once, rejoins rather than stacking a
             # second one, and can actually be closed
-            assert start("plexus-selfcheck-draft", work, "cat", "hello")
+            assert start("plexus-selfcheck-draft", work, ["cat"], "hello")
             assert exists("plexus-selfcheck-draft")
-            assert not start("plexus-selfcheck-draft", work, "cat", "again"), \
+            assert not start("plexus-selfcheck-draft", work, ["cat"], "again"), \
                 "a second click must rejoin, not spawn a duplicate"
+
+            # an agent string is heart's, not a command: the colon form has to
+            # become a CLI plus its model flag or tmux looks for `claude:opus5`
+            assert session_argv("claude") == ["claude"], session_argv("claude")
+            pinned = session_argv("claude:opus5")
+            assert pinned[:2] == ["claude", "--model"] and pinned[2], pinned
+            assert session_argv("api:local") == ["api"], session_argv("api:local")
             # the agent runs interactively: a one-shot invocation would have
             # exited by now, and the session must still be here to return to
             time.sleep(4)
