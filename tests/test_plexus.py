@@ -948,6 +948,10 @@ def test_a_routable_egress_network_is_reported_not_tolerated(monkeypatch):
 
 
 def test_fix_creates_the_network_and_starts_the_proxy(monkeypatch, tmp_path):
+    # doctor(fix=True) seeds .env from .env.example in the directory it runs in;
+    # run it in a scratch dir so the suite never writes into the checkout, which
+    # the sandbox verifier mounts read-only
+    monkeypatch.chdir(tmp_path)
     from plexus import sandbox
 
     script = tmp_path / "egress-proxy.py"
@@ -1102,6 +1106,10 @@ def test_vendor_hosts_are_port_pinned_and_an_injected_one_is_dropped(monkeypatch
 
 
 def test_fix_provisions_a_web_lane_with_its_own_proxy_and_filter(monkeypatch, tmp_path):
+    # doctor(fix=True) seeds .env from .env.example in the directory it runs in;
+    # run it in a scratch dir so the suite never writes into the checkout, which
+    # the sandbox verifier mounts read-only
+    monkeypatch.chdir(tmp_path)
     from plexus import sandbox
 
     script = tmp_path / "egress-proxy.py"
