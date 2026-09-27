@@ -485,6 +485,14 @@ try:
 except SystemExit:
     pass
 
+# a task's feature (id `<task>:<feature>`) amends that task's plan, not the project's
+plan_path(ar, "t1").parent.mkdir(parents=True, exist_ok=True)
+plan_path(ar, "t1").write_text(json.dumps(
+    {"plan_id": "p2", "id": "t1:f1", "title": "t", "spec": "old", "acceptance": "false"}) + "\n")
+amend(sp, "t1:f1", ar, spec_text="new")
+assert load_plan(ar, "t1")[0]["spec"] == "new", load_plan(ar, "t1")
+assert {f["id"] for f in load_plan(ar)} == {"f1", "f2"}, "the project plan must be untouched"
+
 # --- control plane: serve.py carries its own demo(); run it here so its proof
 # (ledger->tab state, goal discovery, flock liveness) guards on the normal check ---
 import contextlib
