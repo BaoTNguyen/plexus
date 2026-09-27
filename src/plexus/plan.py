@@ -264,9 +264,18 @@ def make_plan(spec, root: str | Path = ".", task_id: str = "") -> list[dict]:
                      prompt=prompt, timeout_seconds=spec.timeout, network=spec.network),
             ws.path, out / "plan", key)
         prompt = _retrieved(root, prompt, spec.network) + prompt
+    # `plexus run` dispatches through heart's episode machinery, which resolves
+    # "auto" itself. This turn calls run_agent directly, where "auto" is not an
+    # agent name and raises -- so a goal on auto could not plan at all. Decomposing
+    # a goal is the hardest turn in the loop by definition, so it asks for the top
+    # tier rather than running the heuristic over its own prompt.
+    agent = spec.agent
+    if agent == "auto":
+        from heart.routing import resolve
+        agent = resolve("frontier", default="claude")
     try:
         for i in range(attempts):
-            res = run_agent(spec.agent, prompt, cwd=cwd, extra_env={},
+            res = run_agent(agent, prompt, cwd=cwd, extra_env={},
                             timeout=spec.timeout, log_path=log, agent_cmd=spec.agent_cmd,
                             profile=profile)
             if res["exit_code"] != 0:

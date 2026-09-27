@@ -36,9 +36,11 @@ attempts_per_feature = 3
 episodes_per_goal = 25
 
 [agent]
-name = "claude"   # any heart agent: claude|codex|gemini|opencode|api[:profile]|shell
+model = "claude"  # a model nickname from ~/.config/heart/models.json, a raw heart
+                  # agent string (claude|codex|api[:profile]|shell), or "auto" to
+                  # route each turn from the difficulty its task declares
 timeout = 300
-# cmd = "..."     # custom agent template, prompt in $HEART_PROMPT (overrides name)
+# cmd = "..."     # custom agent template, prompt in $HEART_PROMPT (overrides model)
 # network = "web" # under HEART_SANDBOX: web (public internet, filtered) | api | model
 # pipeline = true # build each feature with heart's implement/test/review roles
 #                 # (default: on when network is "web", off otherwise)
@@ -73,6 +75,9 @@ class GoalSpec:
     suite: str
     attempts_per_feature: int
     episodes_per_goal: int
+    # The agent string heart executes, resolved from `[agent] model`: a model
+    # nickname from models.json, a raw agent string, or "auto" to let heart
+    # route each turn from what the task declares.
     agent: str
     agent_cmd: str | None
     timeout: int
@@ -105,6 +110,26 @@ class GoalSpec:
     manual_checks: tuple[str, ...] = field(default_factory=tuple)
 
 
+def _agent_string(agent: dict) -> str:
+    """`[agent] model` -> the agent string heart runs.
+
+    A model, not a CLI. `model = "claude"` named a family and pinned nothing, so
+    a goal's turns ran whatever that CLI happened to default to and the ledger
+    could not say which model wrote the code. A nickname from models.json
+    resolves through heart to its agent string, which carries the --model pin.
+
+    `name` is the old key and still works, so an existing plexus.toml keeps
+    running. "auto" is returned unchanged: routing needs a task, and the turn
+    that has one resolves it (see plan.py and heart's episode dispatch).
+    """
+    named = agent.get("model") or agent.get("name") or "claude"
+    try:
+        from heart.routing import resolve
+    except Exception:
+        return named  # heart absent: the name is the best answer available
+    return resolve(named, default=named)
+
+
 def spec_path(root: str | Path = ".") -> Path:
     return Path(root) / "plexus.toml"
 
@@ -122,7 +147,7 @@ def load_spec(root: str | Path = ".") -> GoalSpec:
         suite=gt["suite"],
         attempts_per_feature=int(budgets.get("attempts_per_feature", 3)),
         episodes_per_goal=int(budgets.get("episodes_per_goal", 25)),
-        agent=agent.get("name", "claude"),
+        agent=_agent_string(agent),
         agent_cmd=agent.get("cmd"),
         # a web-lane goal gets a reviewer unless it says otherwise: its
         # implementer read pages nobody vetted
@@ -223,6 +248,6 @@ def scaffold_goal(root: str | Path, goal_id: str, text: str, context: str = "") 
         'open_questions = []\nmanual_checks = []\n\n'
         '[ground_truth]\nsuite = "python3 -m pytest -q"\n\n'
         "[budgets]\nattempts_per_feature = 3\nepisodes_per_goal = 25\n\n"
-        f'[agent]\nname = "claude"\ntimeout = 300\nnetwork = "{default_network(root)}"\n')
+        f'[agent]\nmodel = "auto"\ntimeout = 300\nnetwork = "{default_network(root)}"\n')
     _exclude_plexus_state(root)
     return True

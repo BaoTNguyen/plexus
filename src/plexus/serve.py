@@ -1730,7 +1730,7 @@ class _Handler(BaseHTTPRequestHandler):
                 brief.write_text(prompt, encoding="utf-8")
                 stamp = datetime.datetime.now().strftime("%H%M%S")
                 started = term.start(
-                    name, root, spec.agent,
+                    name, root, term.session_argv(spec.agent),
                     f"Read {brief} and follow it.",
                     _run_env(self.server.local_slots, self.server.global_agents),
                     # a conversation decides what gets built; it belongs in the
@@ -2119,6 +2119,16 @@ def demo() -> None:
         saved = load_spec(draft_root)
         assert (saved.goal_id == "real-goal" and saved.pipeline is True
                 and saved.manual_checks == ("click it",)), saved
+        # `name` was the key before the agent became a model; it still reads
+        assert saved.agent == "codex", saved.agent
+        # `model` is the key now, and its value names a model. A raw agent string
+        # passes through, and "auto" stays "auto" because routing needs a task.
+        for value, want in (("codex:sol", "codex:sol"), ("auto", "auto")):
+            (draft_root / "plexus.toml").write_text(
+                '[goal]\nid="real-goal"\ntext="Build the real thing"\n'
+                '[ground_truth]\nsuite="true"\n'
+                f'[agent]\nmodel="{value}"\n')
+            assert load_spec(draft_root).agent == want, value
         assert _goal_lifecycle(draft_root)["state"] == "draft"
         (draft_root / "plexus.toml").write_text(
             '[goal]\nid="real-goal"\ntext="t"\n[ground_truth]\nsuite="true"\n'

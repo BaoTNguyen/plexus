@@ -9,7 +9,8 @@ Pinned surface (from src/plexus/run.py and src/plexus/plan.py):
     from heart.env import Workspace
     from heart.episode import best_episode, run_candidates
     from heart.orchestrate import run_orchestrated
-    from heart.runner import CACHE_MULTIPLIERS
+    from heart.routing import resolve
+    from heart.runner import CACHE_MULTIPLIERS, resolve_model
     from heart.taskspec import TaskSpec
 
 Two layers of pin:
@@ -37,7 +38,8 @@ from heart.detect import detect_verifiers
 from heart.env import Workspace
 from heart.episode import best_episode, run_candidates
 from heart.orchestrate import run_orchestrated
-from heart.runner import CACHE_MULTIPLIERS
+from heart.routing import TIERS, resolve
+from heart.runner import CACHE_MULTIPLIERS, resolve_model
 from heart.taskspec import TaskSpec
 
 BUGGY = "def add(a, b):\n    return a - b\n"
@@ -189,6 +191,30 @@ class TestHeartApiPin(unittest.TestCase):
         self.assertGreater(CACHE_MULTIPLIERS["cache_write_5m"], 1.0)
         self.assertGreater(CACHE_MULTIPLIERS["cache_write_1h"],
                            CACHE_MULTIPLIERS["cache_write_5m"])
+
+    def test_routing_surface_plexus_resolves_names_through(self):
+        """spec.py turns `[agent] model` into an agent string with
+        routing.resolve, and term.py turns that string into argv for an
+        interactive session with runner.resolve_model. Both are plexus reading
+        heart's config vocabulary, so both are seams that can move under us.
+
+        Pinned by behaviour, not by config: a raw agent string must pass through
+        untouched and "auto" must stay "auto", whatever this machine's
+        models.json happens to say. A tier word resolving to a real model needs
+        config, so that is heart's test, not this one.
+        """
+        self.assertEqual(resolve("codex:sol"), "codex:sol")
+        self.assertEqual(resolve("auto"), "auto")
+        # plexus asks for this tier by name for the planner turn (plan.py) and
+        # for a conversation it opens in tmux (term.session_argv)
+        self.assertIn("frontier", TIERS)
+        # with config it names that model, without it falls back to the default;
+        # either way it comes back as an agent string, never the tier word
+        top = resolve("frontier", default="claude")
+        self.assertTrue(top and top not in TIERS, top)
+        # an unregistered profile token is used verbatim, which is what lets
+        # `claude:claude-opus-5` work with no models.json entry at all
+        self.assertEqual(resolve_model("claude-opus-5"), "claude-opus-5")
 
     # ---- end-to-end behavioral pin ---------------------------------------
 
