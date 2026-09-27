@@ -273,9 +273,23 @@ From those two, before any episode runs, every feature gets a class:
 | class | it is one when | what you read |
 | --- | --- | --- |
 | `spine` | `touches` can reach `ledger.py`, `spec.py`, `export.py`, `events.py` or `LEDGER.md`, or `contract` declares a new ledger kind | every line |
-| `boundary` | `contract` adds a CLI subcommand or a `plexus.toml` key, or `touches` can reach the heart API pin | the contract diff and the integration point |
-| `leaf` | one repo, no new public surface beyond `contract` | the report line, unless it says FLAG |
+| `boundary` | `contract` adds a CLI subcommand or a `plexus.toml` key, or `touches` can reach the heart API pin — or, judged from the diff, it changes, renames or removes a public name that code in a sibling repo calls | the contract diff, the integration point, and every caller the hold lists |
+| `leaf` | one repo; any public names it changes are called only from inside this repo | the report line, unless it says FLAG |
 | `mechanical` | docs and tests only | nothing |
+
+**Public surface is judged by who calls it, not by whether it exists.** A new
+public function is covered by this repo's tests and has no outside caller yet,
+so it stays `leaf`. What the repo's own suite cannot see is another repo
+calling the name this diff changed. So at land time plexus reads the diff for
+public names (no leading underscore) that were modified, renamed or deleted,
+searches the tracked Python files of every sibling checkout (`../*` git repos,
+the layout both the vascular umbrella and a single-repo clone give you) for
+references to them through this repo's package, and raises the feature to
+`boundary` when any exist. The hold names each caller as `repo/path:line`, so
+what you read is the seam itself. This complements the heart API pin, which
+covers heart→plexus by hand; the diff check covers every other pair
+(arteries↔capillaries, marrow→heart, heart→arteries) without anyone keeping a
+list.
 
 A class is judged by what the allowlist *permits*, not by what the plan meant:
 `src/plexus/*` reads as `spine` because it could reach the ledger. Narrowing the
@@ -296,8 +310,11 @@ pr_base = "main"               # goal finishes green -> push + open a PR here
 ```
 
 A held feature that passes acceptance raises a `held_for_review` escalation
-instead of committing; `plexus resolve <feature>` (or the dashboard's Resolve)
-signs it off and the next `run` lands it. So the risk class isn't just a
+instead of committing, recording the episode whose diff it held;
+`plexus resolve <feature>` (or the dashboard's Resolve) signs that diff off and
+the next `run` lands *that diff* — it is not rebuilt. What you approved is what
+lands. If it no longer applies to the current base, or its acceptance check now
+fails there, the feature is held again rather than rebuilt and landed unread. So the risk class isn't just a
 post-hoc "what to read" — it's the gate that decides which work agents own
 outright and which stops for you, before the commit exists.
 
