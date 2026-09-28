@@ -731,6 +731,29 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
             # `unverified` counts as "nothing regressed": there was no suite to
             # regress, and refusing to land would deadlock every test-less repo.
             if acc_passed and ep_outcome in ("pass", "unverified") and review != "reject":
+                # a review that never ran is not the same as a review that
+                # passed: pipeline mode promised a reviewer, so anything here
+                # but "approve" (None, "", a crash) means the role never
+                # delivered a verdict -- not that it cleared the diff.
+                if roles is not None and review != "approve":
+                    review_roles = [r for r in ep.get("roles", [])
+                                     if r.get("role", "").startswith("review")]
+                    bad = next((r for r in review_roles
+                                if r.get("timed_out") or r.get("exit_code")), None)
+                    if bad is None and review_roles:
+                        review_note = "review role did not produce a verdict"
+                    elif bad is not None and bad.get("timed_out"):
+                        review_note = "review role timed out"
+                    elif bad is not None:
+                        review_note = f"review role exited {bad['exit_code']}"
+                    else:
+                        review_note = "review role did not run"
+                    ledger.record(
+                        "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
+                        root=root, reason_class="held_for_review",
+                        reason=f"acceptance passed but the review did not run: {review_note}",
+                        episode_ids=[ep_id])
+                    return 1
                 # Software-factory boundary: a green feature whose risk class is
                 # on the goal's review-hold list waits for a human sign-off
                 # instead of auto-landing. Only on the first pass — a prior hold
