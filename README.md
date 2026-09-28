@@ -370,9 +370,9 @@ package in `pyproject.toml`, so the map is *derived* from the same workspace the
 menu scans; `registry.json` is only for explicit pins and out-of-tree repos:
 
 ```json
-// $XDG_CONFIG_HOME/plexus/workspace.json  — the menu + the derived registry
+// ~/.vascular/config/plexus/workspace.json  — the menu + the derived registry
 {"roots": ["/home/me/Coding/Projects"]}
-// $XDG_CONFIG_HOME/plexus/registry.json   — optional overrides (win over derived)
+// ~/.vascular/config/plexus/registry.json   — optional overrides (win over derived)
 {"heart": "/home/me/Coding/Projects/heart"}
 ```
 

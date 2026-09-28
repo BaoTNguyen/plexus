@@ -901,15 +901,15 @@ def test_the_allowlist_is_no_wider_than_the_box_can_use(monkeypatch, tmp_path):
     use it is just a wider allowlist."""
     from plexus import sandbox
 
-    cfg = tmp_path / "heart"
-    cfg.mkdir()
+    cfg = tmp_path / "config" / "heart"
+    cfg.mkdir(parents=True)
     (cfg / "models.json").write_text(json.dumps({"profiles": {
         "local": {"endpoint": "http://127.0.0.1:8001/v1"},
         "local2": {"endpoint": "http://localhost:8002/v1"},
         "same": {"endpoint": "http://127.0.0.1:8001/v1"},   # one server, one entry
         "opus": {"model": "claude-opus-5"},                  # no endpoint, no host
     }}))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("VASCULAR_HOME", str(tmp_path))
     monkeypatch.delenv("HEART_SANDBOX_ENV", raising=False)
     monkeypatch.setattr(sandbox, "_VENDOR_HOSTS", {"claude": ("api.anthropic.com",)})
     monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {"claude": 100.0})

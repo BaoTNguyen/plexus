@@ -8,7 +8,7 @@ queued instead of silently blocking a sibling project.
 
 The map is fleet-level config, the one place that knows which local checkout
 owns which top-level package. Default location
-`$XDG_CONFIG_HOME/plexus/registry.json` (override with `PLEXUS_REGISTRY`):
+`~/.vascular/config/plexus/registry.json` (override with `PLEXUS_REGISTRY`):
 
     {"heart": "/home/me/Coding/Projects/heart",
      "arteries": "/home/me/Coding/Projects/arteries"}
@@ -31,7 +31,8 @@ from .spec import scaffold_goal
 
 
 def _config_dir() -> Path:
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "plexus"
+    from . import vascular_paths
+    return vascular_paths.path("config", "plexus")
 
 
 def _registry_path() -> Path:
