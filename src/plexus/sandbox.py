@@ -70,9 +70,9 @@ def local_model_hosts() -> list[str]:
     the model server; bare, it also hands that agent the host's Postgres on 5432
     and heart's own server on 8000 -- a proxy defeating the reason it exists.
     """
-    cfg_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    from . import vascular_paths
     try:
-        cfg = json.loads((cfg_home / "heart" / "models.json").read_text())
+        cfg = json.loads(vascular_paths.path("config", "heart", "models.json").read_text())
     except Exception:
         return []
 
