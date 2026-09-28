@@ -300,9 +300,15 @@ def seat_env() -> dict[str, str]:
              if dev and Path(f).expanduser().is_file()]
     if "chatgpt" in injected:
         # the plan is the one true fact the stand-in auth.json carries
-        plan = (codex_claims().get("https://api.openai.com/auth") or {}).get("chatgpt_plan_type")
-        if plan:
+        auth = codex_claims().get("https://api.openai.com/auth") or {}
+        if plan := auth.get("chatgpt_plan_type"):
             env["HEART_SANDBOX_CODEX_PLAN"] = str(plan)
+        # Codex 0.157 checks the account its token names against the workspaces
+        # the (injected, real) token can route to, and refuses a stand-in that
+        # names "heart-sentinel". An account id is an identifier, not a
+        # credential: the proxy already sends it upstream on every request.
+        if account := auth.get("chatgpt_account_id"):
+            env["HEART_SANDBOX_CODEX_ACCOUNT"] = str(account)
     for provider, group in _SEAT_FILES.items() if seats else ():
         if (provider, True) in (("claude", "anthropic" in injected),
                                 ("codex", "chatgpt" in injected)):
