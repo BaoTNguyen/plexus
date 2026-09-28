@@ -679,14 +679,14 @@ try:
                         "model": "claude-haiku-4-5",
                         "tokens_in": 1_000_000, "tokens_out": 0}}) + "\n")
     old_ws = os.environ.get("PLEXUS_WORKSPACE")
-    old_xdg = os.environ.get("XDG_CONFIG_HOME")
+    old_xdg = os.environ.get("VASCULAR_HOME")
     os.environ["PLEXUS_WORKSPACE"] = str(tmp / "ws.json")
-    # heart's rate card is read from $XDG_CONFIG_HOME/heart/models.json. Point
-    # it at a fixture: without this the assertions below pass or fail according
-    # to what the developer running the suite happens to have configured.
-    os.environ["XDG_CONFIG_HOME"] = str(tmp / "cfg")
-    (tmp / "cfg" / "heart").mkdir(parents=True, exist_ok=True)
-    (tmp / "cfg" / "heart" / "models.json").write_text(json.dumps({
+    # heart's rate card is read from $VASCULAR_HOME/config/heart/models.json.
+    # Point it at a fixture: without this the assertions below pass or fail
+    # according to what the developer running the suite happens to have configured.
+    os.environ["VASCULAR_HOME"] = str(tmp / "cfg")
+    (tmp / "cfg" / "config" / "heart").mkdir(parents=True, exist_ok=True)
+    (tmp / "cfg" / "config" / "heart" / "models.json").write_text(json.dumps({
         "profiles": {"haiku": {"model": "claude-haiku-4-5"}},
         "pricing": {"claude:haiku": {"in_per_mtok": 1.0, "out_per_mtok": 5.0}},
     }))
@@ -714,7 +714,7 @@ try:
 
         # a model in neither card still bills, at the provider rate: adding one
         # model's rate must not silently stop the others being counted
-        (tmp / "cfg" / "heart" / "models.json").write_text(json.dumps({
+        (tmp / "cfg" / "config" / "heart" / "models.json").write_text(json.dumps({
             "profiles": {}, "pricing": {}}))
         registry.set_accounting_config(
             {"claude": 0, "codex": 0},
@@ -723,7 +723,7 @@ try:
         assert abs(fallback["equivalent_api"] - (2 * want + 5.0)) < 1e-6, \
             f"provider fallback broken: {fallback['equivalent_api']}"
     finally:
-        for key, prior in (("PLEXUS_WORKSPACE", old_ws), ("XDG_CONFIG_HOME", old_xdg)):
+        for key, prior in (("PLEXUS_WORKSPACE", old_ws), ("VASCULAR_HOME", old_xdg)):
             os.environ.pop(key, None) if prior is None \
                 else os.environ.__setitem__(key, prior)
 
@@ -741,11 +741,11 @@ try:
                         "tokens_in": 1_000_000, "tokens_out": 1_000_000,
                         "cache_read": 1_000_000}}) + "\n")
     old_ws = os.environ.get("PLEXUS_WORKSPACE")
-    old_xdg = os.environ.get("XDG_CONFIG_HOME")
+    old_xdg = os.environ.get("VASCULAR_HOME")
     os.environ["PLEXUS_WORKSPACE"] = str(tmp / "ws.json")
     # empty card again, so every turn in the window prices off the provider
     # rate and the only variable under test is the speed multiplier
-    os.environ["XDG_CONFIG_HOME"] = str(tmp / "cfg")
+    os.environ["VASCULAR_HOME"] = str(tmp / "cfg")
     try:
         registry.set_accounting_config(
             {"claude": 0, "codex": 0},
@@ -757,7 +757,7 @@ try:
             f"fast mode not billed at 2x: {fast['equivalent_api']}"
         assert fast["premium_speed"] == {"fast": 1}, fast["premium_speed"]
     finally:
-        for key, prior in (("PLEXUS_WORKSPACE", old_ws), ("XDG_CONFIG_HOME", old_xdg)):
+        for key, prior in (("PLEXUS_WORKSPACE", old_ws), ("VASCULAR_HOME", old_xdg)):
             os.environ.pop(key, None) if prior is None \
                 else os.environ.__setitem__(key, prior)
 
@@ -910,6 +910,9 @@ def test_the_allowlist_is_no_wider_than_the_box_can_use(monkeypatch, tmp_path):
         "opus": {"model": "claude-opus-5"},                  # no endpoint, no host
     }}))
     monkeypatch.setenv("VASCULAR_HOME", str(tmp_path))
+    # seat secrets still live under XDG_CONFIG_HOME; hide the box's own, or an
+    # injected seat drops its vendor host and the result depends on who runs this
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.delenv("HEART_SANDBOX_ENV", raising=False)
     monkeypatch.setattr(sandbox, "_VENDOR_HOSTS", {"claude": ("api.anthropic.com",)})
     monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {"claude": 100.0})
@@ -922,7 +925,7 @@ def test_the_allowlist_is_no_wider_than_the_box_can_use(monkeypatch, tmp_path):
 def test_no_seat_means_no_vendor_host(monkeypatch, tmp_path):
     from plexus import sandbox
 
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))   # no models.json
+    monkeypatch.setenv("VASCULAR_HOME", str(tmp_path))     # no models.json
     monkeypatch.delenv("HEART_SANDBOX_ENV", raising=False)
     monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {})
     assert sandbox.allowlist() == []
