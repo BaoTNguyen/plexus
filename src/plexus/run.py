@@ -36,7 +36,7 @@ from . import tasks as _tasks
 from .plan import matches as _matches
 from .plan import execution_order, load_plan, parse_expect
 from .registry import seed_upstream
-from .review import classify, exec_surface, report, suspicious
+from .review import classify, cross_repo_callers, exec_surface, report, suspicious
 
 # heart episode outcomes that are mechanical failures — no valid applied diff to
 # judge a criterion against, so acceptance is skipped and it's a coding failure.
@@ -766,6 +766,11 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 flags = suspicious(repo, base, diff)
                 if cls not in spec.review_hold:
                     cls = "exec" if runs_here else "suspect" if flags else cls
+                # a name this diff changed that a sibling checkout still refers
+                # to is a break plexus can't see from one repo alone
+                callers = cross_repo_callers(repo, base, diff)
+                if cls not in spec.review_hold and callers:
+                    cls = "boundary"
                 if cls in spec.review_hold and not _held_before(
                         ledger.read(root), spec.goal_id, fid):
                     ledger.record(
@@ -777,7 +782,9 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                                + (f" (runs on your machine: {', '.join(runs_here[:5])})"
                                   if runs_here else "")
                                + (f" (new in this diff: {'; '.join(flags[:5])})"
-                                  if flags else ""),
+                                  if flags else "")
+                               + (f" (called from: {', '.join(callers[:10])})"
+                                  if callers else ""),
                         episode_ids=[ep_id])
                     return 1
                 # Scope gate, last thing before the commit exists. Not a retry:
