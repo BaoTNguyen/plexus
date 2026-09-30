@@ -309,6 +309,12 @@ def seat_env() -> dict[str, str]:
         # credential: the proxy already sends it upstream on every request.
         if account := auth.get("chatgpt_account_id"):
             env["HEART_SANDBOX_CODEX_ACCOUNT"] = str(account)
+        ca = seat_secrets() / "tls" / "ca.pem"
+        if ca.is_file():
+            env["HEART_SANDBOX_INJECT_TLS_PORT"] = os.environ.get(
+                "HEART_SANDBOX_INJECT_TLS_PORT", "8890"
+            )
+            env["HEART_SANDBOX_CA_CERT"] = str(ca)
     for provider, group in _SEAT_FILES.items() if seats else ():
         if (provider, True) in (("claude", "anthropic" in injected),
                                 ("codex", "chatgpt" in injected)):

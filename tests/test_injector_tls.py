@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from plexus import tls
+from plexus import registry, tls
 
 pytestmark = pytest.mark.skipif(not shutil.which("openssl"), reason="needs openssl")
 
@@ -64,3 +64,47 @@ def test_provision_renews_expiring_proxy_cert_without_touching_ca(tmp_path):
 
     assert (tmp_path / "ca.pem").read_bytes() == ca_before
     assert "tls proxy: ok" in tls.status(tmp_path)[1]
+
+
+def test_seat_env_sets_tls_vars_when_chatgpt_seat_has_ca(monkeypatch, tmp_path):
+    monkeypatch.setattr(registry, "injected_seats", lambda: ["chatgpt"])
+    monkeypatch.setattr(registry, "seat_secrets", lambda: tmp_path)
+    monkeypatch.setattr(registry, "codex_claims", lambda: {})
+    monkeypatch.delenv("HEART_SANDBOX_INJECT_TLS_PORT", raising=False)
+    monkeypatch.delenv("HEART_SANDBOX_HOME_FILES", raising=False)
+    tls_dir = tmp_path / "tls"
+    tls_dir.mkdir()
+    (tls_dir / "ca.pem").write_text("ca")
+
+    env = registry.seat_env()
+
+    assert env["HEART_SANDBOX_INJECT_TLS_PORT"] == "8890"
+    assert env["HEART_SANDBOX_CA_CERT"] == str(tls_dir / "ca.pem")
+
+
+def test_seat_env_omits_tls_vars_when_ca_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(registry, "injected_seats", lambda: ["chatgpt"])
+    monkeypatch.setattr(registry, "seat_secrets", lambda: tmp_path)
+    monkeypatch.setattr(registry, "codex_claims", lambda: {})
+    monkeypatch.delenv("HEART_SANDBOX_HOME_FILES", raising=False)
+
+    env = registry.seat_env()
+
+    assert "HEART_SANDBOX_INJECT_TLS_PORT" not in env
+    assert "HEART_SANDBOX_CA_CERT" not in env
+
+
+def test_seat_env_never_leaks_a_key_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(registry, "injected_seats", lambda: ["chatgpt"])
+    monkeypatch.setattr(registry, "seat_secrets", lambda: tmp_path)
+    monkeypatch.setattr(registry, "codex_claims", lambda: {})
+    monkeypatch.delenv("HEART_SANDBOX_HOME_FILES", raising=False)
+    tls_dir = tmp_path / "tls"
+    tls_dir.mkdir()
+    (tls_dir / "ca.pem").write_text("ca")
+    (tls_dir / "ca.key").write_text("key")
+    (tls_dir / "proxy.key").write_text("key")
+
+    env = registry.seat_env()
+
+    assert not any(str(v).endswith(".key") for v in env.values())
