@@ -89,17 +89,36 @@ def _write_via_tmp(dir: Path, name: str, mode: int, run) -> None:
 
 
 def _make_ca(d: Path) -> None:
-    _write_via_tmp(d, "ca.key", 0o600, lambda out: _openssl(
-        "ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", out,
-    ))
-    _write_via_tmp(d, "ca.pem", 0o644, lambda out: _openssl(
-        "req", "-x509", "-new", "-key", str(d / "ca.key"), "-days", str(_CA_DAYS),
-        "-subj", "/CN=plexus egress CA",
-        "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
-        "-addext", "keyUsage=critical,keyCertSign,cRLSign",
-        "-addext", "nameConstraints=critical,permitted;DNS:egress,permitted;DNS:egress-web",
-        "-out", out,
-    ))
+    """Build ca.key and ca.pem in a scratch dir next to `d`, then move both
+    into place back-to-back -- a crash mid-build leaves the scratch dir with
+    a partial pair and `d` untouched, never a mismatched pair in `d`."""
+    with tempfile.TemporaryDirectory(dir=d) as tmp:
+        t = Path(tmp)
+        _write_via_tmp(t, "ca.key", 0o600, lambda out: _openssl(
+            "ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", out,
+        ))
+        _write_via_tmp(t, "ca.pem", 0o644, lambda out: _openssl(
+            "req", "-x509", "-new", "-key", str(t / "ca.key"), "-days", str(_CA_DAYS),
+            "-subj", "/CN=plexus egress CA",
+            "-addext", "basicConstraints=critical,CA:TRUE,pathlen:0",
+            "-addext", "keyUsage=critical,keyCertSign,cRLSign",
+            "-addext", "nameConstraints=critical,permitted;DNS:egress,permitted;DNS:egress-web",
+            "-out", out,
+        ))
+        os.replace(t / "ca.key", d / "ca.key")
+        os.replace(t / "ca.pem", d / "ca.pem")
+
+
+def _ca_pair_matches(d: Path) -> bool:
+    """True if ca.key and ca.pem both exist and share a public key."""
+    key, pem = d / "ca.key", d / "ca.pem"
+    if not key.is_file() or not pem.is_file():
+        return False
+    key_pub = _openssl("pkey", "-in", str(key), "-pubout")
+    pem_pub = _openssl("x509", "-in", str(pem), "-pubkey", "-noout")
+    if key_pub.returncode != 0 or pem_pub.returncode != 0:
+        return False
+    return key_pub.stdout == pem_pub.stdout
 
 
 def _make_proxy_cert(d: Path) -> None:
@@ -136,11 +155,11 @@ def provision(dir: Path | None = None) -> None:
     d = _tls_dir(dir)
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-    ca_created = not (d / "ca.key").is_file() or not (d / "ca.pem").is_file()
-    if ca_created:
+    ca_needs_regen = not _ca_pair_matches(d)
+    if ca_needs_regen:
         _make_ca(d)
 
     proxy_days = _days_left(d / "proxy.pem")
     proxy_stale = proxy_days is None or proxy_days < _EXPIRY_WARNING_DAYS
-    if ca_created or proxy_stale or not (d / "proxy.key").is_file():
+    if ca_needs_regen or proxy_stale or not (d / "proxy.key").is_file():
         _make_proxy_cert(d)
