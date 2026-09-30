@@ -63,6 +63,17 @@ uv tool install --editable . --with-editable ../heart   # `plexus` on your PATH,
 plexus doctor                        # what this box still needs to run agents
 ```
 
+## Seats and the credential injector
+
+Each seat's secrets live under `seat_secrets()`, rooted at
+`~/.config/heart/secrets` — the credential injector reads from there rather
+than trusting anything the sandboxed agent process can see or set.
+
+The injector's proxy intercepts outbound TLS, so it needs its own CA and a
+matching proxy cert; both live under `seat_secrets()/tls`. To rotate them,
+delete that `tls/` directory and run `plexus doctor --fix` — it regenerates
+the CA and cert and restarts the proxies to pick them up.
+
 ## plexus vs heart — the boundary
 
 Both orchestrate agents, so the line must be sharp or the repos bleed into
