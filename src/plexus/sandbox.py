@@ -28,6 +28,15 @@ PROXY = os.environ.get("HEART_EGRESS_CONTAINER", "egress")
 PROXY_PORT = os.environ.get("HEART_SANDBOX_PROXY_PORT", "8888")
 INJECT_PORT = os.environ.get("HEART_SANDBOX_INJECT_PORT", "8889")
 IMAGE = os.environ.get("HEART_SANDBOX_IMAGE", "heart-agent:latest")
+
+
+def _inject_tls_port() -> str:
+    """Read at call time, not import time: a module-level constant would bake
+    in whatever the env held at first import, and leak into every test that
+    imports this module after one monkeypatches the var."""
+    return os.environ.get("HEART_SANDBOX_INJECT_TLS_PORT", "8890")
+
+
 # The web lane: its own --internal network and its own proxy, because every
 # container on a network reaches every port of every proxy on it -- a shared
 # network would let an "api" task borrow the web lane's reach.
@@ -171,7 +180,7 @@ def _running_config(proxy: str) -> dict | None:
     if running.strip() != "true":
         return None
     mounts, _, env = rest.partition("\t")
-    have = dict.fromkeys(("ALLOW", "DENY", "INJECT_PORT"), "")
+    have = dict.fromkeys(("ALLOW", "DENY", "INJECT_PORT", "INJECT_TLS_PORT"), "")
     for line in env.splitlines():
         key, _, value = line.partition("=")
         if key in have:
@@ -182,12 +191,20 @@ def _running_config(proxy: str) -> dict | None:
 
 
 def _wanted_config(allow: str, deny: str = "") -> dict:
-    from .registry import injected_seats
+    from .registry import injected_seats, seat_secrets
 
     injected = injected_seats()
+    # TLS only for the route that uses it, and only once its own files exist:
+    # a proxy must never be told to serve TLS without the cert to back it.
+    tls_dir = seat_secrets() / "tls"
+    tls_ready = ("chatgpt" in injected
+                 and (tls_dir / "ca.pem").is_file()
+                 and (tls_dir / "proxy.pem").is_file()
+                 and (tls_dir / "proxy.key").is_file())
     # secrets whenever anything is injected: the sentinel seed lives there,
     # and without it the injector accepts nothing
     return {"ALLOW": allow, "DENY": deny, "INJECT_PORT": INJECT_PORT if injected else "",
+            "INJECT_TLS_PORT": _inject_tls_port() if tls_ready else "",
             "secrets": bool(injected), "codex": "chatgpt" in injected}
 
 
@@ -206,6 +223,8 @@ def _start_proxy(proxy: str, network: str, want: dict, script: Path) -> str:
             "-v", f"{script}:/proxy.py:ro"]
     if want["INJECT_PORT"]:
         args += ["-e", f"INJECT_PORT={want['INJECT_PORT']}"]
+    if want["INJECT_TLS_PORT"]:
+        args += ["-e", f"INJECT_TLS_PORT={want['INJECT_TLS_PORT']}"]
     # directories, not files: a token rewritten by rename would leave a
     # single-file bind pointing at the old inode, and the proxy reads the file
     # on every request precisely so a rotation needs no restart. ~/.codex whole
@@ -342,6 +361,18 @@ def doctor(fix: bool = False) -> list[str]:
     """
     log: list[str] = toolchain(fix=fix)
     say = log.append
+
+    from . import tls
+    from .registry import injected_seats
+
+    # only the route that uses TLS provisions it, so a box with no ChatGPT
+    # seat never ends up permanently "stale" over a cert nothing reads
+    if fix and "chatgpt" in injected_seats():
+        try:
+            tls.provision()
+        except Exception as exc:
+            say(f"tls: cannot provision -- {exc}")
+    log.extend(tls.status())
 
     if not shutil.which("docker"):
         say("docker: not installed -- no sandboxed run can start")
