@@ -148,6 +148,45 @@ def _build(spec, task, candidates: int, roles, runs_dir) -> list[dict]:
     return [run_orchestrated(task, roles=roles, **kwargs) for _ in range(max(1, candidates))]
 
 
+_SANDBOX_START_ERROR = "sandbox failed to start"
+
+
+class _SandboxUnavailable(Exception):
+    """Raised when _build_sandbox_retrying exhausts its tries — the sandbox
+    itself never came up, so there is no episode to judge. Caught one frame
+    up, where the attempt number is still in scope, and turned into an
+    escalation rather than a feature.failed (this was never the agent's
+    fault)."""
+
+    def __init__(self, last_error: str):
+        super().__init__(last_error)
+        self.last_error = last_error
+
+
+def _build_sandbox_retrying(spec, task, candidates, roles, runs_dir,
+                            goal_id: str, feature_id: str, attempt: int,
+                            root: Path) -> list[dict]:
+    """_build, absorbing up to 3 total tries of a sandbox that failed to even
+    start. Each failure is logged as `sandbox.start_failed` instead of
+    `feature.failed` — it never reached the agent — and the attempt number
+    passed in is never advanced by this function. Any other RuntimeError, or
+    a 3rd straight sandbox-start failure, propagates for the caller to
+    escalate."""
+    last_error = ""
+    for _ in range(3):
+        try:
+            return _build(spec, task, candidates, roles, runs_dir)
+        except RuntimeError as e:
+            msg = str(e)
+            if not msg.startswith(_SANDBOX_START_ERROR):
+                raise
+            last_error = msg
+            ledger.record("sandbox.start_failed", goal_id=goal_id,
+                          feature_id=feature_id, root=root, attempt=attempt,
+                          error=msg[-300:])
+    raise _SandboxUnavailable(last_error)
+
+
 def _episode_cost(episodes: list[dict]) -> dict:
     """Sum usage across every candidate actually run this attempt — best-of-N
     pays for the losing candidates too, so cost must count them, not just the
@@ -218,24 +257,44 @@ def _feature_state(recs: list[dict], goal_id: str,
     Returns (state, next_attempt, budget_used) where state is
     landed|escalated|open. Numbering is monotonic and never reused, but
     `escalation.resolved` resets the *budget* — so budget_used counts attempts
-    since the last resolution, not since the feature began (LEDGER)."""
+    since the last resolution, not since the feature began (LEDGER).
+
+    A `feature.started` whose only follow-up was one or more
+    `sandbox.start_failed` records (the sandbox itself never came up — no
+    `feature.failed`/`feature.landed` ever resulted) does not spend an
+    attempt: the agent never got a turn, so resuming after such a run must
+    not charge the feature for it."""
     landed = False
     max_attempt = 0
     open_escalations = 0
     budget_used = 0
+    pending = False       # an unflushed feature.started
+    had_sandbox_failure = False
+    had_failed = False
     for r in recs:
         if r.get("goal_id") != goal_id or r.get("feature_id") != feature_id:
             continue
-        if r["kind"] == "feature.landed":
-            landed = True
-        elif r["kind"] == "feature.started":
+        kind = r["kind"]
+        if kind == "feature.started":
+            if pending and not (had_sandbox_failure and not had_failed):
+                budget_used += 1
             max_attempt = max(max_attempt, int(r.get("attempt", 0)))
-            budget_used += 1
-        elif r["kind"] == "escalation.raised":
+            pending, had_sandbox_failure, had_failed = True, False, False
+        elif kind == "feature.landed":
+            landed = True
+            pending = False
+        elif kind == "feature.failed":
+            had_failed = True
+        elif kind == "sandbox.start_failed":
+            had_sandbox_failure = True
+        elif kind == "escalation.raised":
             open_escalations += 1
-        elif r["kind"] == "escalation.resolved":
+        elif kind == "escalation.resolved":
             open_escalations -= 1
             budget_used = 0  # resolving hands the feature a fresh budget
+            pending = False
+    if pending and not (had_sandbox_failure and not had_failed):
+        budget_used += 1
     if landed:
         return "landed", max_attempt, budget_used
     state = "escalated" if open_escalations > 0 else "open"
@@ -663,9 +722,19 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 # reviewer REJECT blocks the land (run.py already reads
                 # review_verdict below). Solo turn otherwise.
                 roles = _roles(spec)
-                cands = _build(spec, task, candidates, roles, root / runs_dir)
+                cands = _build_sandbox_retrying(spec, task, candidates, roles,
+                                                root / runs_dir, spec.goal_id,
+                                                fid, attempt, root)
                 ep = best_episode(cands)
                 attempt_cost = _episode_cost(cands)  # best-of-N pays for all N
+            except _SandboxUnavailable as exc:
+                ledger.record(
+                    "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
+                    root=root, reason_class="sandbox_unavailable",
+                    reason=f"sandbox failed to start 3 times in a row: "
+                           f"{exc.last_error}",
+                    episode_ids=last_episode_ids)
+                return 1
             finally:
                 os.environ.pop("PLEXUS_GOAL_ID", None)
                 os.environ.pop("PLEXUS_FEATURE_ID", None)

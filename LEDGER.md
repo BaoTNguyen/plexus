@@ -56,6 +56,7 @@ Written fsynced *before* the corresponding spine event.
 | `plan.approved` | plan_id, approver (`human`\|`auto`), waived `[]` | waived = unverifiable criteria the human accepted |
 | `feature.started` | attempt, task_id, retry_context | attempt numbering is monotonic per feature, never reused; retry_context is the failure tail the prompt carried — the retry-training input |
 | `feature.failed` | attempt, task_id, episode_id?, failure_class, reason | one per failed attempt |
+| `sandbox.start_failed` | attempt, error | the sandbox itself never came up for this try (infra, not the agent) — logged instead of `feature.failed`; up to 3 tries per attempt before escalating, none of which advance `attempt` or spend its budget (see `_feature_state`) |
 | `acceptance.round` | attempt, task_id, episode_id, passed, check | plexus's judgment in the real tree — heart cannot see this |
 | `feature.landed` | attempt, task_id, episode_id, commit | |
 | `escalation.raised` | reason_class, reason, episode_ids | a question for the human, with the evidence attached |
@@ -70,7 +71,9 @@ Written fsynced *before* the corresponding spine event.
 `regression`, `unverifiable_ground_truth`, `destructive_action`,
 `blocked_on_decision` (the agent asked for a decision mid-run instead of
 guessing; `escalation.resolved.resolution` carries the answer, injected into
-the next attempt).
+the next attempt), `sandbox_unavailable` (3 straight `sandbox.start_failed`
+tries for one attempt — the run stops rather than burning the feature's
+budget on infra that never gave the agent a turn).
 
 ## Export contract (what marrow reads)
 
