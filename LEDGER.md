@@ -57,6 +57,7 @@ Written fsynced *before* the corresponding spine event.
 | `feature.started` | attempt, task_id, retry_context | attempt numbering is monotonic per feature, never reused; retry_context is the failure tail the prompt carried — the retry-training input |
 | `feature.failed` | attempt, task_id, episode_id?, failure_class, reason | one per failed attempt |
 | `sandbox.start_failed` | attempt, error | the sandbox itself never came up for this try (infra, not the agent) — logged instead of `feature.failed`; up to 3 tries per attempt before escalating, none of which advance `attempt` or spend its budget (see `_feature_state`) |
+| `seat.exhausted` | attempt, seat, resets | a role's agent log carried Claude's or Codex/OpenAI's weekly/usage-limit phrasing mid-run — the seat ran out, not the agent; `seat` is `<role>/<agent>`, `resets` is the reset time as written in the log. Logged instead of `feature.failed`, same exclusion as `sandbox.start_failed` (see `_feature_state`); scanned only for normal (pipeline or solo) episodes with role logs, never orchestrated/repair/decomposer roles |
 | `acceptance.round` | attempt, task_id, episode_id, passed, check | plexus's judgment in the real tree — heart cannot see this |
 | `feature.landed` | attempt, task_id, episode_id, commit | |
 | `escalation.raised` | reason_class, reason, episode_ids | a question for the human, with the evidence attached |
@@ -73,7 +74,10 @@ Written fsynced *before* the corresponding spine event.
 guessing; `escalation.resolved.resolution` carries the answer, injected into
 the next attempt), `sandbox_unavailable` (3 straight `sandbox.start_failed`
 tries for one attempt — the run stops rather than burning the feature's
-budget on infra that never gave the agent a turn).
+budget on infra that never gave the agent a turn), `seat_exhausted` (a role's
+agent log showed a weekly/usage-limit line with a reset time — the run stops
+immediately, before any `feature.failed`, and the task lands on `blocked`
+rather than waiting for `attempts_exhausted`).
 
 ## Export contract (what marrow reads)
 

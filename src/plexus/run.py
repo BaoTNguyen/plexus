@@ -270,16 +270,19 @@ def _feature_state(recs: list[dict], goal_id: str,
     budget_used = 0
     pending = False       # an unflushed feature.started
     had_sandbox_failure = False
+    had_seat_exhausted = False
     had_failed = False
     for r in recs:
         if r.get("goal_id") != goal_id or r.get("feature_id") != feature_id:
             continue
         kind = r["kind"]
         if kind == "feature.started":
-            if pending and not (had_sandbox_failure and not had_failed):
+            if pending and not ((had_sandbox_failure or had_seat_exhausted)
+                                and not had_failed):
                 budget_used += 1
             max_attempt = max(max_attempt, int(r.get("attempt", 0)))
-            pending, had_sandbox_failure, had_failed = True, False, False
+            pending, had_sandbox_failure, had_seat_exhausted, had_failed = \
+                True, False, False, False
         elif kind == "feature.landed":
             landed = True
             pending = False
@@ -287,18 +290,91 @@ def _feature_state(recs: list[dict], goal_id: str,
             had_failed = True
         elif kind == "sandbox.start_failed":
             had_sandbox_failure = True
+        elif kind == "seat.exhausted":
+            had_seat_exhausted = True
         elif kind == "escalation.raised":
             open_escalations += 1
         elif kind == "escalation.resolved":
             open_escalations -= 1
             budget_used = 0  # resolving hands the feature a fresh budget
             pending = False
-    if pending and not (had_sandbox_failure and not had_failed):
+    if pending and not ((had_sandbox_failure or had_seat_exhausted) and not had_failed):
         budget_used += 1
     if landed:
         return "landed", max_attempt, budget_used
     state = "escalated" if open_escalations > 0 else "open"
     return state, max_attempt + 1, budget_used
+
+
+# A reset time, as literally written after "resets " / "try again at " /
+# "try again in ": a clock time (with optional am/pm and tz paren), a bare
+# HH:MM, a month/day, or a relative "in N units". Anything else ("a bit",
+# "later", "soon") is a transient rate-limit, not a seat-exhaustion signal.
+_TIME_EXPR = (
+    r"(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)(?:\s*\([A-Za-z_/+-]+\))?"
+    r"|\d{1,2}:\d{2}(?:\s*(?:UTC|[A-Z]{2,4}))?"
+    r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}"
+    r"(?:,?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?"
+    r"|in\s+\d+\s*(?:s|sec|seconds?|m|min|minutes?|h|hours?|d|days?))"
+)
+_CLAUDE_SEAT_RE = re.compile(
+    r"you've hit your.*limit.*?resets\s+(" + _TIME_EXPR + r")", re.IGNORECASE)
+_CODEX_TRIGGER_RE = re.compile(r"usage limit|rate limit", re.IGNORECASE)
+_CODEX_RESET_RE = re.compile(
+    r"(?:resets|try again at|try again in)\s+(" + _TIME_EXPR + r")", re.IGNORECASE)
+
+
+def _seat_exhaustion(log_text: str) -> str | None:
+    """Scan one role's agent log for Claude's or Codex/OpenAI's seat-exhaustion
+    phrasing. Returns the reset-time text if found, else None. A plain
+    rate-limit line with no reset time is a transient hiccup, not exhaustion,
+    so it is deliberately left unmatched (see LEDGER.md)."""
+    lines = log_text.splitlines()
+    for line in lines:
+        m = _CLAUDE_SEAT_RE.search(line)
+        if m:
+            return m.group(1)
+    for i, line in enumerate(lines):
+        if not _CODEX_TRIGGER_RE.search(line):
+            continue
+        window = line if i + 1 >= len(lines) else line + "\n" + lines[i + 1]
+        m = _CODEX_RESET_RE.search(window)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _check_seat_exhausted(ep: dict, runs_dir: Path, goal_id: str,
+                          feature_id: str, attempt: int, root: Path) -> bool:
+    """Scan every role's log of a normal-build episode for a seat-exhaustion
+    signal. On a match, record `seat.exhausted` (excluded from attempt
+    counting, see `_feature_state`) and `escalation.raised` with
+    reason_class=`seat_exhausted`, and report True so the caller stops the
+    run without charging the attempt or writing `feature.failed`.
+
+    Orchestrated runs and episodes with no role logs (empty `roles`) are the
+    caller's job to exclude — this only scans what it's handed."""
+    out = runs_dir / ep["episode_id"]
+    for role in ep.get("roles") or []:
+        name = role.get("role", "")
+        log_path = out / f"{name}.log"
+        try:
+            text = log_path.read_text()
+        except OSError:
+            continue
+        reset = _seat_exhaustion(text)
+        if reset is None:
+            continue
+        seat = f"{name}/{role.get('agent', '')}"
+        ledger.record("seat.exhausted", goal_id=goal_id, feature_id=feature_id,
+                      root=root, attempt=attempt, seat=seat, resets=reset)
+        ledger.record(
+            "escalation.raised", goal_id=goal_id, feature_id=feature_id,
+            root=root, reason_class="seat_exhausted",
+            reason=f"seat '{seat}' hit its usage limit, resets {reset}",
+            episode_ids=[ep["episode_id"]])
+        return True
+    return False
 
 
 def _verifier_tail(ep: dict, limit: int = 1000) -> str:
@@ -741,6 +817,20 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
             ep_id = ep["episode_id"]
             last_episode_ids.append(ep_id)
             ep_outcome = ep["outcome"]
+
+            # Seat exhaustion (weekly/usage limit hit mid-role) is an infra
+            # stop, not a coding failure — same family as sandbox.start_failed.
+            # Scanned across every candidate this attempt built, best-of-N or
+            # not, since a losing candidate hit the same seat the winner did.
+            # Scoped to the normal build path only: an orchestrated run's
+            # decomposer/merge/repair roles are a follow-up task's problem, not
+            # this one's, and a candidate with no roles has no log to read.
+            if not spec.orchestrate and any(
+                    _check_seat_exhausted(c, root / runs_dir, spec.goal_id,
+                                         fid, attempt, root)
+                    for c in cands if c.get("roles")):
+                return 1
+
             # Distil the sandbox's refusals now, while the episode's events are
             # still in the journal. The journal rotates on a day scale and
             # plexus reasons on a multi-week one, so a later scan would return

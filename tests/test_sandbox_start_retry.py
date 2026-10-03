@@ -199,3 +199,128 @@ def test_a_non_sandbox_runtime_error_still_propagates(monkeypatch, repo):
     recs = ledger.read(repo)
     assert not any(r["kind"] == "sandbox.start_failed" for r in recs)
     assert not any(r["kind"] == "escalation.raised" for r in recs)
+
+
+# --- seat exhaustion -------------------------------------------------------
+
+_SEAT_MUST_MATCH = [
+    "You've hit your weekly limit · resets 12am (UTC)",
+    "You've hit your org's monthly spend limit · ask your admin to raise "
+    "it at claude.ai/admin-settings/usage · your session limit resets "
+    "8am (UTC)",
+    "You have hit a usage limit, resets 3:15pm",
+    "rate limit hit\ntry again at Oct 3",
+    "usage limit reached, resets in 30 minutes",
+]
+
+_SEAT_MUST_NOT_MATCH = [
+    "You've hit your daily quota, come back tomorrow",     # no "limit" + reset time
+    "You've hit your weekly limit, nothing to see here",   # no reset time at all
+    "rate limit; try again in a bit",                      # not a time expression
+    "rate limit hit, retry later",                         # no time expression
+]
+
+
+def test_seat_must_match_examples_extract_the_reset_text():
+    assert run_mod._seat_exhaustion(_SEAT_MUST_MATCH[0]) == "12am (UTC)"
+    assert run_mod._seat_exhaustion(_SEAT_MUST_MATCH[1]) == "8am (UTC)"
+    assert run_mod._seat_exhaustion(_SEAT_MUST_MATCH[2]) == "3:15pm"
+    assert run_mod._seat_exhaustion(_SEAT_MUST_MATCH[3]) == "Oct 3"
+    assert run_mod._seat_exhaustion(_SEAT_MUST_MATCH[4]) is not None  # a reset time was found
+    # not-time cases from the spec must stay unmatched regardless of trigger phrase
+    assert run_mod._seat_exhaustion("rate limit; try again in a bit") is None
+
+
+def test_seat_must_not_match_examples_stay_unmatched():
+    for text in _SEAT_MUST_NOT_MATCH:
+        assert run_mod._seat_exhaustion(text) is None
+
+
+def _write_role_log(root, runs_dir, ep_id, role, text):
+    out = root / runs_dir / ep_id
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"{role}.log").write_text(text)
+
+
+def _pipeline_episode(root, runs_dir, ep_id, diff, *, implement_log=""):
+    (root / runs_dir / ep_id).mkdir(parents=True, exist_ok=True)
+    (root / runs_dir / ep_id / "diff.patch").write_text(diff)
+    for role, agent, log in (
+        ("implement", "claude", implement_log),
+        ("test", "claude", ""),
+        ("review", "claude", ""),
+    ):
+        _write_role_log(root, runs_dir, ep_id, role, log)
+    return {
+        "episode_id": ep_id, "outcome": "pass", "review_verdict": "approve",
+        "roles": [{"role": "implement", "agent": "claude"},
+                  {"role": "test", "agent": "claude"},
+                  {"role": "review", "agent": "claude"}],
+    }
+
+
+def test_seat_exhaustion_in_a_pipeline_episode_stops_the_run(monkeypatch, repo):
+    ep = _pipeline_episode(repo, "runs", "ep-1", _add_diff(repo),
+                           implement_log=_SEAT_MUST_MATCH[0])
+    _prime(repo)
+    monkeypatch.setattr(run_mod, "_build", lambda *a, **k: [ep])
+
+    code = run_mod._walk(_spec(pipeline=True), repo, "runs", 1, "")
+    recs = ledger.read(repo)
+
+    assert code == 1
+    assert not any(r["kind"] == "feature.failed" for r in recs)
+    seat_recs = [r for r in recs if r["kind"] == "seat.exhausted"]
+    assert len(seat_recs) == 1
+    assert seat_recs[0]["goal_id"] == "g1"
+    assert seat_recs[0]["feature_id"] == "f1"
+    assert seat_recs[0]["attempt"] == 1
+    assert seat_recs[0]["seat"] == "implement/claude"
+    assert seat_recs[0]["resets"] == "12am (UTC)"
+    esc = [r for r in recs if r["kind"] == "escalation.raised"]
+    assert len(esc) == 1
+    assert esc[0]["reason_class"] == "seat_exhausted"
+    assert "implement/claude" in esc[0]["reason"]
+
+    state, next_attempt, budget_used = run_mod._feature_state(recs, "g1", "f1")
+    assert state == "escalated"
+
+
+def test_seat_exhaustion_on_a_non_best_candidate_still_stops_the_run(monkeypatch, repo):
+    good = _pipeline_episode(repo, "runs", "ep-best", _add_diff(repo))
+    exhausted = _pipeline_episode(repo, "runs", "ep-other", _add_diff(repo),
+                                  implement_log=_SEAT_MUST_MATCH[0])
+    _prime(repo)
+    monkeypatch.setattr(run_mod, "_build", lambda *a, **k: [good, exhausted])
+    monkeypatch.setattr(run_mod, "best_episode", lambda cands: cands[0])
+
+    code = run_mod._walk(_spec(pipeline=True), repo, "runs", 2, "")
+    recs = ledger.read(repo)
+
+    assert code == 1
+    seat_recs = [r for r in recs if r["kind"] == "seat.exhausted"]
+    assert len(seat_recs) == 1
+    assert not any(r["kind"] == "feature.failed" for r in recs)
+    assert not any(r["kind"] == "feature.landed" for r in recs)
+
+
+def test_orchestrated_style_episode_with_a_limit_line_does_not_raise_seat_exhausted(
+        monkeypatch, repo):
+    """Repair-role logs under an orchestrated run are out of scope for this
+    feature (a follow-up task covers them) — the scan must not even look."""
+    ep_id = "ep-orch"
+    out = repo / "runs" / ep_id
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "diff.patch").write_text(_add_diff(repo))
+    _write_role_log(repo, "runs", ep_id, "repair", _SEAT_MUST_MATCH[0])
+    ep = {"episode_id": ep_id, "outcome": "pass", "review_verdict": None,
+          "roles": [{"role": "repair", "agent": "claude"}]}
+    _prime(repo)
+    monkeypatch.setattr(run_mod, "_build", lambda *a, **k: [ep])
+
+    code = run_mod._walk(_spec(orchestrate=True), repo, "runs", 1, "")
+    recs = ledger.read(repo)
+
+    assert not any(r["kind"] == "seat.exhausted" for r in recs)
+    assert not any(r.get("reason_class") == "seat_exhausted" for r in recs
+                   if r["kind"] == "escalation.raised")
