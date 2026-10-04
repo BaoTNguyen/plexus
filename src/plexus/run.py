@@ -344,6 +344,12 @@ def _seat_exhaustion(log_text: str) -> str | None:
     return None
 
 
+#: agents that run on a subscription seat (api:*, shell and local models don't)
+SEAT_AGENTS = ("claude", "codex")
+#: how far from the end of a role log the CLI's own limit error can sit
+SEAT_TAIL_LINES = 15
+
+
 def _check_seat_exhausted(ep: dict, runs_dir: Path, goal_id: str,
                           feature_id: str, attempt: int, root: Path) -> bool:
     """Scan every role's log of a normal-build episode for a seat-exhaustion
@@ -357,9 +363,15 @@ def _check_seat_exhausted(ep: dict, runs_dir: Path, goal_id: str,
     out = runs_dir / ep["episode_id"]
     for role in ep.get("roles") or []:
         name = role.get("role", "")
+        # Only a subscription seat can run out, and the CLI prints its limit
+        # error last. A whole-log scan of any role read the test role's
+        # (api:local) pytest output -- which printed sample limit messages
+        # from the seat tests themselves -- as a spent seat.
+        if role.get("agent", "").split(":")[0] not in SEAT_AGENTS:
+            continue
         log_path = out / f"{name}.log"
         try:
-            text = log_path.read_text()
+            text = "\n".join(log_path.read_text().splitlines()[-SEAT_TAIL_LINES:])
         except OSError:
             continue
         reset = _seat_exhaustion(text)
