@@ -576,7 +576,7 @@ def _open_pr(spec, root: Path, repo: str) -> str:
         return f"could not open PR: {exc}"
 
 
-def _feature_prompt(spec, feat: dict, retry_context: str) -> str:
+def _feature_prompt(spec, feat: dict, retry_context: dict) -> str:
     parts = [feat["spec"]]
     if spec.context:
         parts.append(f"Repo context: {spec.context}")
@@ -597,9 +597,17 @@ def _feature_prompt(spec, feat: dict, retry_context: str) -> str:
         parts.append("The `expect:` block above is not documentation — that "
                      "command is executed after the acceptance check passes and "
                      "every line under it must appear in its output.")
-    if retry_context:
+    if retry_context.get("resume_answer"):
+        parts.append(retry_context["resume_answer"])
+    if retry_context.get("failure_tail"):
         parts.append("A previous attempt did not satisfy the acceptance check. "
-                     f"Its output tail:\n{retry_context}\nFix the cause.")
+                     f"Its output tail:\n{retry_context['failure_tail']}\nFix the cause.")
+    if retry_context.get("review_findings"):
+        lines = "\n".join(
+            f"- [{f.get('severity')}] {f.get('file')}:{f.get('line')}: {f.get('claim')}"
+            for f in retry_context["review_findings"])
+        parts.append("A previous attempt was rejected by review. Findings:\n"
+                     f"{lines}\nAddress these before the next attempt.")
     parts.append(
         "If a decision is genuinely missing or the requirements are ambiguous or "
         "contradictory, do not guess. Write a single line "
@@ -771,7 +779,8 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
             return 1
 
         # if a prior block was just answered, carry the answer into the next attempt
-        retry_context = _resume_answer(recs, spec.goal_id, fid)
+        resume_answer = _resume_answer(recs, spec.goal_id, fid)
+        retry_context: dict = {"resume_answer": resume_answer} if resume_answer else {}
         landed = False
         last_episode_ids: list[str] = []
         attempt = next_attempt
@@ -881,7 +890,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                               failure_class=_MECHANICAL.get(ep_outcome, "episode_error"),
                               episode_outcome=ep_outcome, acceptance_passed=None,
                               reason=f"outcome={ep_outcome}", **attempt_cost)
-                retry_context = _verifier_tail(ep)
+                retry_context = {**retry_context, "failure_tail": _verifier_tail(ep)}
                 attempt += 1
                 continue
 
@@ -1015,7 +1024,15 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                                   f"acceptance={'pass' if acc_passed else 'fail'}")
                                  + f" regression={'FAIL' if ep_outcome == 'fail' else 'ok'}",
                           **attempt_cost)
-            retry_context = acc_tail if not acc_passed else _verifier_tail(ep)
+            if review == "reject":
+                findings = [
+                    {"severity": f.get("severity"), "file": f.get("file"),
+                     "line": f.get("line"), "claim": f.get("claim")}
+                    for f in ep.get("review_findings", [])]
+                retry_context = {**retry_context, "review_findings": findings}
+            else:
+                tail = acc_tail if not acc_passed else _verifier_tail(ep)
+                retry_context = {**retry_context, "failure_tail": tail}
             attempt += 1
 
         if not landed:
