@@ -60,6 +60,7 @@ Written fsynced *before* the corresponding spine event.
 | `seat.exhausted` | attempt, seat, resets | a role's agent log carried Claude's or Codex/OpenAI's weekly/usage-limit phrasing mid-run — the seat ran out, not the agent; `seat` is `<role>/<agent>`, `resets` is the reset time as written in the log. Logged instead of `feature.failed`, same exclusion as `sandbox.start_failed` (see `_feature_state`); scanned only for normal (pipeline or solo) episodes with role logs, never orchestrated/repair/decomposer roles |
 | `acceptance.round` | attempt, task_id, episode_id, passed, check | plexus's judgment in the real tree — heart cannot see this |
 | `feature.landed` | attempt, task_id, episode_id, commit | |
+| `review.concern` | severity, file, line, claim | written on an `approve` verdict, one per `concern`/`blocker` finding the reviewer still carried at approval — an approve discards the word, not what the reviewer noticed on the way past |
 | `escalation.raised` | reason_class, reason, episode_ids | a question for the human, with the evidence attached |
 | `escalation.resolved` | resolution | resets the feature's attempt *budget* (not its numbering) |
 | `goal.finished` | outcome (`scope_satisfied`\|`abandoned`), episodes_total | |

@@ -145,7 +145,15 @@ def why(root: str = ".", feature_id: str | None = None) -> list[str]:
     if feature_id:
         targets = [t for t in targets if t[1] == feature_id]
         if not targets:
-            return [f"feature {feature_id}: no failures or escalations recorded"]
+            concerns = [r for r in recs if r.get("feature_id") == feature_id
+                        and r["kind"] == "review.concern"]
+            if not concerns:
+                return [f"feature {feature_id}: no failures or escalations recorded"]
+            out = [f"feature {feature_id}:"]
+            for r in concerns:
+                out.append(f"  review concern [{r.get('severity')}] "
+                           f"{r.get('file')}:{r.get('line')}: {r.get('claim')}")
+            return out
 
     out: list[str] = []
     for goal_id, fid in targets:
@@ -171,6 +179,11 @@ def why(root: str = ".", feature_id: str | None = None) -> list[str]:
         landed = next((r for r in frecs if r["kind"] == "feature.landed"), None)
         if landed:
             out.append(f"  -> later landed on attempt {landed.get('attempt', '?')}")
+
+        for r in frecs:
+            if r["kind"] == "review.concern":
+                out.append(f"  review concern [{r.get('severity')}] "
+                           f"{r.get('file')}:{r.get('line')}: {r.get('claim')}")
 
         # a block is the agent confirming the goal is ambiguous — the signal that
         # turns the intent lean into certainty
