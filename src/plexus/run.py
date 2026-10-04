@@ -462,20 +462,20 @@ def _check_expect(cwd: str, expect: tuple[str, list[str]],
 
 
 def _resume_answer(recs: list[dict], goal_id: str, feature_id: str) -> str:
-    """If the feature's most recent block was answered (escalation.resolved after
-    a blocked_on_decision escalation), the text to inject into the next attempt —
-    warren's question_answered, in batch form."""
+    """If the feature's most recent escalation was answered (escalation.resolved
+    after an escalation.raised, any reason_class), the text to inject into the
+    next attempt — warren's question_answered, in batch form."""
     q = a = None
     for r in recs:
         if r.get("goal_id") != goal_id or r.get("feature_id") != feature_id:
             continue
         if r["kind"] == "escalation.raised":
-            q = r.get("reason") if r.get("reason_class") == "blocked_on_decision" else None
+            q = r.get("reason")
             a = None
         elif r["kind"] == "escalation.resolved":
             a = r.get("resolution")
     if q and a:
-        return (f"A decision you were blocked on has been answered.\n"
+        return (f"An escalation you raised has been answered.\n"
                 f"Question: {q}\nAnswer: {a}\nProceed with this decided.")
     return ""
 
