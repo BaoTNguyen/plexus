@@ -975,6 +975,22 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 ledger.record("feature.landed", goal_id=spec.goal_id, feature_id=fid,
                               root=root, attempt=attempt, task_id=task_id,
                               episode_id=ep_id, commit=commit, **attempt_cost)
+                # an approve verdict still carries findings -- a blocker never
+                # ships, but a concern the reviewer judged "not fatal" lands
+                # anyway, so record it instead of letting the verdict word
+                # discard it (see heart's review.py docstring).
+                if review == "approve":
+                    for finding in ep.get("review_findings", []):
+                        if finding.get("severity") not in ("concern", "blocker"):
+                            continue
+                        ledger.record(
+                            "review.concern", goal_id=spec.goal_id, feature_id=fid,
+                            root=root, severity=finding["severity"],
+                            file=finding.get("file"), line=finding.get("line"),
+                            claim=finding.get("claim"))
+                        print(f"review concern [{finding['severity']}] {fid} "
+                              f"{finding.get('file')}:{finding.get('line')}: "
+                              f"{finding.get('claim')}")
                 landed = True
                 break
 
