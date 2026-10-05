@@ -134,6 +134,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="cap on ALL agents across goals, stamped into each run")
 
     args = p.parse_args(argv)
+    # heart builds the sandbox's .git mount from this path, and Docker refuses a
+    # relative mount, so the default "." must not reach it as ".".
+    if getattr(args, "root", None):
+        args.root = os.path.abspath(args.root)
     # Credentials are fleet policy, so they are decided once, here, rather than
     # in whichever shell happened to launch a run. Every subcommand and every
     # child inherits the same answer -- `plexus serve` spawns `python -m
