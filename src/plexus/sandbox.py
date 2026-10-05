@@ -166,7 +166,7 @@ def proxy_script() -> Path | None:
         return None
 
 
-def _running_config(proxy: str) -> dict | None:
+def _running_config(proxy: str, running_only: bool = True) -> dict | None:
     """The settings a proxy is running with -- ALLOW, INJECT_PORT, whether the
     seat secrets are mounted -- or None if it is not running. The whole config
     is compared, not ALLOW alone: a token saved after the proxy started needs
@@ -177,7 +177,7 @@ def _running_config(proxy: str) -> dict | None:
     if rc != 0:
         return None
     running, _, rest = out.partition("\t")
-    if running.strip() != "true":
+    if running_only and running.strip() != "true":
         return None
     mounts, _, env = rest.partition("\t")
     have = dict.fromkeys(("ALLOW", "DENY", "INJECT_PORT", "INJECT_TLS_PORT"), "")
@@ -353,6 +353,47 @@ def seat_report() -> list[str]:
     return out
 
 
+def _check_network(network: str, fix: bool) -> tuple[list[str], bool, bool]:
+    """Report on one lane's network; with fix, create it if missing.
+
+    Returns (report lines, ok-to-proceed, just-created). Split out of doctor()
+    so ensure() can run the same create-if-missing repair without the rest of
+    doctor's unattended provisioning.
+    """
+    log: list[str] = []
+    rc, out = _docker("network", "inspect", network, "--format", "{{.Internal}}")
+    if rc != 0:
+        log.append(f"network {network}: missing")
+        if fix:
+            rc, out = _docker("network", "create", "--internal", network)
+            if rc == 0:
+                log.append("  created --internal")
+                return log, True, True
+            log.append(f"  create failed: {out}")
+        return log, False, False
+    if out.strip() != "true":
+        # not a nit: a routable network means the agent has the open internet
+        # and the proxy it was pointed at is decoration
+        log.append(f"network {network}: NOT --internal -- agents on it reach the open internet")
+        return log, False, False
+    log.append(f"network {network}: ok (--internal)")
+    return log, True, False
+
+
+def _tls_would_provision() -> bool:
+    """True when a ChatGPT seat is injected but the CA/cert material behind
+    INJECT_TLS_PORT doesn't exist yet. `_wanted_config` hides exactly this
+    case -- it just omits INJECT_TLS_PORT from `want` until the files exist,
+    so a bare have-vs-want compare can call a proxy fully OK even though
+    `doctor --fix` would provision TLS material and restart it."""
+    from .registry import injected_seats, seat_secrets
+
+    if "chatgpt" not in injected_seats():
+        return False
+    tls_dir = seat_secrets() / "tls"
+    return not all((tls_dir / f).is_file() for f in ("ca.pem", "proxy.pem", "proxy.key"))
+
+
 def doctor(fix: bool = False) -> list[str]:
     """Report the box's sandbox readiness; with fix=True, make it so.
 
@@ -379,18 +420,8 @@ def doctor(fix: bool = False) -> list[str]:
         return log
 
     for network, proxy, allow, deny in lanes():
-        rc, out = _docker("network", "inspect", network, "--format", "{{.Internal}}")
-        if rc != 0:
-            say(f"network {network}: missing")
-            if fix:
-                rc, out = _docker("network", "create", "--internal", network)
-                say(f"  created --internal" if rc == 0 else f"  create failed: {out}")
-        elif out.strip() != "true":
-            # not a nit: a routable network means the agent has the open internet
-            # and the proxy it was pointed at is decoration
-            say(f"network {network}: NOT --internal -- agents on it reach the open internet")
-        else:
-            say(f"network {network}: ok (--internal)")
+        net_log, _net_ok, _created = _check_network(network, fix=fix)
+        log.extend(net_log)
 
         want = _wanted_config(allow, deny)
         have = _running_config(proxy)
@@ -444,6 +475,116 @@ def _listening(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def _missing_secrets(cfg: dict | None) -> list[str]:
+    """Files a proxy created with `cfg` reads at runtime that no longer exist.
+    No config at all (the container is gone) counts as missing everything."""
+    from .registry import seat_secrets
+
+    if cfg is None:
+        return ["the proxy container itself"]
+    need = []
+    if cfg.get("INJECT_PORT"):
+        need.append(seat_secrets() / "sentinel")
+    if cfg.get("INJECT_TLS_PORT"):
+        need += [seat_secrets() / "tls" / f for f in ("ca.pem", "proxy.pem", "proxy.key")]
+    if cfg.get("codex"):
+        need.append(Path.home() / ".codex" / "auth.json")
+    return [str(p) for p in need if not p.is_file()]
+
+
+class SandboxNotReady(RuntimeError):
+    """ensure() found no running sandbox state it could restore without
+    provisioning secrets or changing a running proxy's settings -- those are
+    decisions `plexus doctor --fix` makes, not ensure()."""
+
+
 def ensure() -> list[str]:
-    """What a run does before a wave: fix what is fixable, say what is not."""
-    return doctor(fix=True)
+    """What a run does before a wave: restore each lane to the state it was
+    already running in, and report (never apply) anything that would need
+    `plexus doctor --fix` instead.
+
+    Unlike doctor(fix=True) this never provisions CA/cert/sentinel material
+    (nothing under seat_secrets()) and never restarts a running proxy onto
+    newly-computed settings -- a wave in flight assumes the proxy it already
+    dialed through keeps answering. It only: creates a missing network,
+    reattaches an already-running proxy to a network just created for it, and
+    restarts a stopped proxy by reusing its own last-known-running container
+    (never provisioning). If none of that leaves a workable state, it raises
+    SandboxNotReady with every report line gathered so far.
+    """
+    log: list[str] = []
+    say = log.append
+
+    def stop(message: str) -> None:
+        raise SandboxNotReady(message + "\n" + "\n".join(log))
+
+    if not shutil.which("docker"):
+        stop("docker is not installed -- no sandboxed run can start. "
+             "Run `plexus doctor --fix` after reviewing.")
+
+    for network, proxy, allow, deny in lanes():
+        net_log, net_ok, created = _check_network(network, fix=True)
+        log.extend(net_log)
+        if not net_ok:
+            stop(f"could not repair network {network} -- "
+                 "run `plexus doctor --fix` after reviewing.")
+
+        have = _running_config(proxy)
+
+        if have is None:
+            # Reuse the container as it was last created -- no recreate, no
+            # new env, no mounts added: if its secrets are missing, that is
+            # exactly the unworkable case this stops for. docker start alone
+            # can't tell: the mounts are directories, so it starts fine over an
+            # emptied one and the injector then refuses every request.
+            missing = _missing_secrets(_running_config(proxy, running_only=False))
+            if missing:
+                stop(f"proxy {proxy} is stopped and its saved secrets are gone "
+                     f"({', '.join(missing)}) -- run `plexus doctor --fix` after reviewing.")
+            rc, out = _docker("start", proxy)
+            if rc != 0:
+                stop(f"proxy {proxy} is not running and could not be restarted "
+                     f"({out}) -- run `plexus doctor --fix` after reviewing.")
+            say(f"proxy {proxy}: restarted with its own last-known-running settings")
+
+        if created:
+            rc, out = _docker("network", "connect", network, proxy)
+            if rc != 0:
+                stop(f"could not attach proxy {proxy} to {network} ({out}) -- "
+                     "run `plexus doctor --fix` after reviewing.")
+            say(f"  proxy {proxy}: attached to {network}")
+
+        if have is not None:
+            want = _wanted_config(allow, deny)
+            if have != want or _tls_would_provision():
+                say(f"proxy {proxy}: running, but its settings differ from what's wanted")
+                say(f"  running: {have}")
+                say(f"  wanted:  {want}"
+                    + (" (+ TLS material not yet provisioned)" if _tls_would_provision() else ""))
+                say("  not restarted -- `plexus doctor --fix` would apply this and restart it")
+            else:
+                say(f"proxy {proxy}: ok ({allow or 'injector only'})")
+
+    for line in seat_report():
+        say(line)
+
+    try:  # lazy: heart may be absent; the except says so rather than guessing
+        from heart.sandbox import image_is_stale
+
+        stale = image_is_stale(IMAGE)
+    except Exception as exc:  # heart not importable: say so rather than guess
+        stale = f"cannot check image: {exc}"
+    if stale:
+        say(f"image {IMAGE}: {stale.splitlines()[0]}")
+        say("  not rebuilt: `docker build` is slow and destructive of a working "
+            "image -- run it yourself when you have read the reason")
+    else:
+        say(f"image {IMAGE}: ok")
+
+    for host in local_model_hosts():
+        _, port = host.rsplit(":", 1)
+        say(f"model server :{port}: {'listening' if _listening(int(port)) else 'DOWN'}")
+
+    containers, trees = reap()
+    say(f"reaped: {containers} dead container(s), {trees} worktree(s)")
+    return log

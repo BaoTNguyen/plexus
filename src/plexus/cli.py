@@ -177,15 +177,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "run":
         from .run import run
-        from .sandbox import ensure
+        from .sandbox import SandboxNotReady, ensure
         from .spec import load_spec
         # Before the wave, not per episode. Every goal in this run assumes the
         # same network, the same proxy and the same image; discovering that any
         # of them is missing costs one failed episode per goal otherwise, each
         # taking its full timeout to say so.
         if os.environ.get("HEART_SANDBOX", "off") not in ("off", ""):
-            for line in ensure():
-                print(f"sandbox: {line}")
+            try:
+                for line in ensure():
+                    print(f"sandbox: {line}")
+            except SandboxNotReady as exc:
+                print(f"sandbox: {exc}")
+                return 1
         return run(load_spec(args.root), args.root, candidates=args.candidates,
                    task_id=args.task)
     if args.cmd == "amend":
