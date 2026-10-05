@@ -561,7 +561,7 @@ def ensure() -> list[str]:
                 say(f"  running: {have}")
                 say(f"  wanted:  {want}"
                     + (" (+ TLS material not yet provisioned)" if _tls_would_provision() else ""))
-                say("  not restarted -- `plexus doctor --fix` would apply this and restart it")
+                say("  not restarted -- run `plexus doctor --fix` after reviewing to apply this and restart it")
             else:
                 say(f"proxy {proxy}: ok ({allow or 'injector only'})")
 
