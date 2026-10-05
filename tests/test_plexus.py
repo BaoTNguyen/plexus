@@ -1187,7 +1187,7 @@ def test_a_contained_planner_keeps_its_memory(tmp_path):
     from plexus.plan import _retrieved
 
     assert _retrieved(tmp_path, "plan it") == ""
-    hooks = tmp_path / ".arteries" / "hooks"
+    hooks = tmp_path / ".vascular" / "arteries" / "hooks"
     hooks.mkdir(parents=True)
     (hooks / "hook-observe.sh").write_text(
         'python3 -c "import json,sys; print(\'<retrieved>\' + json.load(sys.stdin)[\'prompt\'])"')

@@ -49,8 +49,8 @@ PIN_TEST = "tests/test_heart_api_pin.py"
 # diff at land time -- not the plan, which is the agent's own prediction -- and
 # land only with a sign-off. Directory globs for trees, basenames for files
 # that execute wherever they sit.
-EXEC_DIRS = (".claude/**", ".arteries/**", ".codex/**", ".github/**", ".vscode/**",
-             ".devcontainer/**", ".idea/**", ".husky/**")
+EXEC_DIRS = (".claude/**", ".arteries/**", ".vascular/**", ".codex/**", ".github/**",
+             ".vscode/**", ".devcontainer/**", ".idea/**", ".husky/**")
 EXEC_NAMES = ("conftest.py", "setup.py", "setup.cfg", "pyproject.toml",
               "requirements*.txt", "uv.lock", "poetry.lock", "Pipfile*",
               "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",

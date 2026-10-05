@@ -190,14 +190,14 @@ def _retrieved(root: str | Path, prompt: str, lane: str = "") -> str:
 
     On the host the planner's retrieval arrives through the UserPromptSubmit
     hook in the checkout's gitignored .claude/settings.local.json, which calls
-    .arteries/hooks/hook-observe.sh by absolute host path. Neither exists inside
+    .vascular/arteries/hooks/hook-observe.sh by absolute host path. Neither exists inside
     a container, so a contained planner would plan with no memory and nothing
     would say so. Running the same hook here, with the same prompt, gives the
     same gate and the same packet -- and records the turn, as the hook would.
 
     Never raises: a planner without memory is worse, not broken.
     """
-    hook = Path(root) / ".arteries" / "hooks" / "hook-observe.sh"
+    hook = vascular_state.repo_dir(root, "arteries") / "hooks" / "hook-observe.sh"
     if not hook.is_file():
         return ""
     try:

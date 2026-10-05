@@ -13,6 +13,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import vascular_state
+
 TEMPLATE = '''\
 [goal]
 id = "my-goal"
@@ -174,7 +176,7 @@ def install_integration(root: str | Path = ".") -> str:
     green, which is why this has to happen at init rather than be noticed later.
     Best effort: arteries may not be installed, and a goal repo without it works.
     """
-    if (Path(root) / ".arteries").is_dir():
+    if vascular_state.repo_dir(root, "arteries").is_dir():
         return "arteries: already wired"
     try:
         r = subprocess.run(
