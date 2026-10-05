@@ -19,6 +19,7 @@ from heart.taskspec import TaskSpec
 from . import ledger
 from . import overview as _overview
 from . import tasks as _tasks
+from . import vascular_state
 
 PLAN_PROMPT = """\
 You are planning a software goal that will be built one feature at a time by a
@@ -115,8 +116,8 @@ def plan_path(root: str | Path = ".", task_id: str = "") -> Path:
     of work rather than to the project — the project has an overview, not a
     feature list. The unsuffixed path is what repos written before tasks used,
     and is still what `plexus plan` with no task writes."""
-    base = Path(root) / ".plexus"
-    return base / "plans" / f"{task_id}.jsonl" if task_id else base / "plan.jsonl"
+    return (vascular_state.plans_dir(root) / f"{task_id}.jsonl" if task_id
+            else vascular_state.plan_jsonl_path(root))
 
 
 def _parse_features(raw: str) -> list[dict]:
@@ -214,9 +215,9 @@ def _retrieved(root: str | Path, prompt: str, lane: str = "") -> str:
 
 
 def make_plan(spec, root: str | Path = ".", task_id: str = "") -> list[dict]:
-    out = Path(root) / ".plexus"
+    out = vascular_state.plexus_dir(root)
     out.mkdir(parents=True, exist_ok=True)
-    log = out / "plan.log"
+    log = vascular_state.plan_log_path(root)
     task = None
     if task_id:
         task = next((t for t in _tasks.read(root) if t["id"] == task_id), None)
@@ -407,7 +408,7 @@ def amend(spec, feature_id: str, root: str | Path = ".",
     """Fix one not-yet-landed feature's plan in place.
 
     The plan is otherwise immutable once armed, so a criterion discovered wrong
-    mid-run used to mean hand-editing .plexus/plan.jsonl. This rewrites the one
+    mid-run used to mean hand-editing .vascular/plexus/plan.jsonl. This rewrites the one
     feature's fields and records plan.amended. A landed feature is refused — its
     commit already shipped, so amending it would be a lie. Re-run `plexus run`
     after amending; the feature reopens against the new criterion.
@@ -457,7 +458,7 @@ def approve(spec, root: str | Path = ".", approver: str = "human",
         raise SystemExit(
             "plan not approved — these acceptance criteria are not usable ground truth:\n"
             + "\n".join(f"  {fid}: {why}" for fid, why in bad)
-            + "\nFix them in .plexus/plan.jsonl, or `plexus approve --waive` to accept.")
+            + "\nFix them in .vascular/plexus/plan.jsonl, or `plexus approve --waive` to accept.")
     ledger.record("plan.approved", goal_id=spec.goal_id, root=root,
                   plan_id=plan_id, task=task_id, approver=approver,
                   waived=[fid for fid, _ in bad])

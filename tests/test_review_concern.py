@@ -20,6 +20,7 @@ for p in (here.parents[1] / "src", here.parents[2] / "heart" / "src"):
     sys.path.insert(0, str(p))
 
 from plexus import diagnose, ledger  # noqa: E402
+from plexus import vascular_state
 from plexus.spec import GoalSpec  # noqa: E402
 from plexus import run as run_mod  # noqa: E402
 
@@ -52,7 +53,7 @@ def _add_diff(repo, name="foo.txt", content="hello\n") -> str:
 
 
 def _write_plan(root: Path, feat: dict) -> None:
-    plans = root / ".plexus"
+    plans = vascular_state.plexus_dir(root)
     plans.mkdir(parents=True, exist_ok=True)
     (plans / "plan.jsonl").write_text(json.dumps(feat) + "\n")
 
