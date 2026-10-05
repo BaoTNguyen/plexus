@@ -15,13 +15,14 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import json
 import re
 import subprocess
 import tempfile
 from pathlib import Path
 
 from . import ledger
-from .plan import load_plan, matches as _matches
+from .plan import load_plan, matches as _matches, plan_path
 
 # Paths where a mistake is unrecoverable, from LEDGER.md's system-of-record
 # table: the ledger schema, the spec that keys records to it, and the exports
@@ -242,7 +243,12 @@ def _declared(feat: dict) -> set[str]:
 
 def rows(spec, root: str | Path = ".", repo: str | Path | None = None) -> list[dict]:
     repo = repo or root
-    plan = {f["id"]: f for f in load_plan(root)}
+    # every task's plan plus the pre-task one: a repo with tasks has no
+    # plan.jsonl, and load_plan(root) raising SystemExit here killed the run
+    # after goal.finished, before the task was marked landed
+    files = [plan_path(root), *sorted(plan_path(root).parent.glob("plans/*.jsonl"))]
+    plan = {f["id"]: f for p in files if p.exists()
+            for f in (json.loads(l) for l in p.read_text().splitlines() if l.strip())}
     out: list[dict] = []
     for r in ledger.read(root):
         if r["kind"] != "feature.landed" or r.get("goal_id") != spec.goal_id:
