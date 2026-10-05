@@ -7,7 +7,7 @@ apart is the whole point of this file. Before it, `[source]` lived on the goal,
 so the project's charter and one closable work item shared a slot and the UI
 could not tell you which one you were editing.
 
-Storage is one JSON object per line in `.plexus/tasks.jsonl`, append-only, last
+Storage is one JSON object per line in `.vascular/plexus/tasks.jsonl`, append-only, last
 write per id wins — the same habit as `ledger.py`, for the same reasons: it is
 diffable in git, it survives a torn tail, and a concurrent append under
 PIPE_BUF is atomic without a lock.
@@ -25,13 +25,15 @@ import re
 import tempfile
 from pathlib import Path
 
+from . import vascular_state
+
 STATES = ("open", "planning", "ready", "running", "blocked", "landed", "closed")
 #: terminal states — a blocker in one of these no longer blocks
 DONE = ("landed", "closed")
 
 
 def tasks_path(root: str | Path = ".") -> Path:
-    return Path(root) / ".plexus" / "tasks.jsonl"
+    return vascular_state.tasks_path(root)
 
 
 def _now() -> str:

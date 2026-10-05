@@ -3,7 +3,7 @@
 Warren shape (plan / run / activity / answer cards) mapped onto plexus's real
 surface, but built on plexus's stack, not warren's: stdlib http.server + one
 HTML file, no bearer auth, no SQLite, no build step. State still lives in
-`.plexus/*.jsonl` — this is a lens over the system of record plus three write
+`.vascular/plexus/*.jsonl` — this is a lens over the system of record plus three write
 paths (approve, resolve, run/stop) that call the same code the CLI does.
 
 The README rejected a web UI for the autonomous loop; this is the deliberate
@@ -40,6 +40,7 @@ from urllib.parse import parse_qs, urlparse
 from heart.runner import CACHE_MULTIPLIERS, speed_multiplier
 
 from . import diagnose, ledger, observe, overview, registry, review, tasks, term, translog
+from . import vascular_state
 from .plan import approve, auto_plan, load_plan
 from .run import _feature_state, _open_pr
 from .spec import load_spec
@@ -203,7 +204,7 @@ def _goal_lifecycle(root: Path) -> dict:
         state = "ready"
     else:
         spec_mtime = (root / "plexus.toml").stat().st_mtime
-        log = root / ".plexus" / "plan.log"
+        log = vascular_state.plan_log_path(root)
         failed_job = (job["kind"] == "plan" and job["exit_code"] not in (None, 0))
         recent_error_log = log.exists() and log.stat().st_mtime >= spec_mtime
         placeholder = (spec.goal_id == "my-goal"
@@ -265,7 +266,7 @@ def _running(root: Path) -> bool:
     nobody's running (release immediately); if we're blocked, one is. Works for
     terminal-started runs too, and is immune to PID reuse (unlike reading the
     stamped pid), because the kernel drops the flock the instant the holder dies."""
-    lock = Path(root) / ".plexus" / "lock"
+    lock = vascular_state.lock_path(root)
     if not lock.exists():
         return False
     try:
@@ -443,7 +444,7 @@ def _term_windows(root: Path, roots: list[Path]) -> dict:
     session = _term_name(root, roots)
     live = term.windows(session)
     live_names = {w["name"] for w in live}
-    folder = Path(root) / ".plexus" / "transcripts"
+    folder = vascular_state.transcripts_dir(root)
     past = []
     for path in sorted(folder.glob("*.log"), reverse=True)[:40]:
         if path.stem not in live_names:
@@ -1156,7 +1157,7 @@ def _spawn(root: Path, *args: str, local_slots: int = 0,
     job = None
     if term.available():
         stamp = datetime.datetime.now().strftime("%H%M%S")
-        work = Path(root) / ".plexus"
+        work = vascular_state.plexus_dir(root)
         job = term.run_window(
             _term_name(root, roots or [root]), Path(root), f"{kind}-{stamp}",
             cmd, env,
@@ -1200,7 +1201,7 @@ def _stop(root: Path) -> bool:
     if not _running(root):
         return False
     try:
-        pid = int((Path(root) / ".plexus" / "lock").read_text().strip())
+        pid = int(vascular_state.lock_path(root).read_text().strip())
         # guard against PID reuse: the flock says *a* run holds the lock, but the
         # stamped pid could have been recycled by an unrelated process. Only
         # signal if the pid still looks like a plexus run. On platforms without
@@ -1602,7 +1603,7 @@ class _Handler(BaseHTTPRequestHandler):
             if not self._allowed_root(root):
                 return self._json({"error": "unknown root"}, 403)
             name = Path(qs.get("name", [""])[0]).name  # basename only: no ../
-            path = Path(root) / ".plexus" / "transcripts" / name
+            path = vascular_state.transcript_path(root, name)
             if not name or not path.is_file():
                 return self._json({"error": "no such transcript"}, 404)
             if qs.get("format", [""])[0] == "lines":
@@ -1725,7 +1726,7 @@ class _Handler(BaseHTTPRequestHandler):
                 # every quote and newline in it becomes an escaping problem, and
                 # a paste that large trips the bracketed-paste handling of some
                 # CLIs. One short line has neither failure.
-                brief = root / ".plexus" / f"discuss-{view}.md"
+                brief = vascular_state.discuss_path(root, view)
                 brief.parent.mkdir(parents=True, exist_ok=True)
                 brief.write_text(prompt, encoding="utf-8")
                 stamp = datetime.datetime.now().strftime("%H%M%S")
@@ -1735,7 +1736,7 @@ class _Handler(BaseHTTPRequestHandler):
                     _run_env(self.server.local_slots, self.server.global_agents),
                     # a conversation decides what gets built; it belongs in the
                     # same append-only recording a run gets, not in scrollback
-                    transcript=root / ".plexus" / "transcripts" / f"{view}-{stamp}.log")
+                    transcript=vascular_state.transcript_path(root, f"{view}-{stamp}.log"))
                 if not started:
                     return self._json({"error": "could not open a session"}, 500)
                 return self._json({"ok": True, "session": name, "rejoined": False})
@@ -2073,7 +2074,7 @@ def demo() -> None:
         root = Path(d)
         (root / "plexus.toml").write_text(
             '[goal]\nid="g1"\ntext="t"\n[ground_truth]\nsuite="true"\n')
-        (root / ".plexus").mkdir()
+        vascular_state.plexus_dir(root).mkdir(parents=True)
         recs = [
             {"kind": "plan.created", "goal_id": "g1", "ts": "2026-01-01T00:00:00+00:00",
              "features": [{"feature_id": "f1", "title": "one", "acceptance": "true"}]},
@@ -2085,10 +2086,10 @@ def demo() -> None:
              "reason_class": "blocked_on_decision", "reason": "which db?",
              "ts": "2026-01-01T00:03:00+00:00"},
         ]
-        (root / ".plexus" / "plan.jsonl").write_text(
+        vascular_state.plan_jsonl_path(root).write_text(
             json.dumps({"plan_id": "p1", "id": "f1", "title": "one",
                         "spec": "s", "acceptance": "true"}) + "\n")
-        (root / ".plexus" / "ledger.jsonl").write_text(
+        vascular_state.ledger_path(root).write_text(
             "\n".join(json.dumps(r) for r in recs) + "\n")
 
         det = _goal_detail(root)
@@ -2140,7 +2141,7 @@ def demo() -> None:
 
         # flock probe: a held lock (any process) reads as running; released -> not.
         # Two open fds conflict under flock even within one process.
-        lock = root / ".plexus" / "lock"
+        lock = vascular_state.lock_path(root)
         lock.write_text("12345")
         assert _running(root) is False
         held = open(lock, "w")
@@ -2158,11 +2159,11 @@ def demo() -> None:
 
         # run-all picks approved + idle goals only, honoring the goal cap
         root2 = root / "sub_g2"
-        (root2 / ".plexus").mkdir(parents=True)
-        (root2 / ".plexus" / "ledger.jsonl").write_text(
+        vascular_state.plexus_dir(root2).mkdir(parents=True)
+        vascular_state.ledger_path(root2).write_text(
             json.dumps({"kind": "plan.approved", "goal_id": "g2",
                         "plan_id": "p2"}) + "\n")
-        (root2 / ".plexus" / "plan.jsonl").write_text(
+        vascular_state.plan_jsonl_path(root2).write_text(
             json.dumps({"plan_id": "p2", "id": "f1"}) + "\n")
         assert _approved(root) and _approved(root2)
         assert _startable([root, root2], 0) == [root, root2]   # no cap: both idle

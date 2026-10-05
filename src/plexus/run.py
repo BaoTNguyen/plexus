@@ -33,6 +33,7 @@ from heart.taskspec import TaskSpec
 
 from . import events, ledger, scope
 from . import tasks as _tasks
+from . import vascular_state
 from .plan import matches as _matches
 from .plan import execution_order, load_plan, parse_expect
 from .registry import seed_upstream
@@ -83,7 +84,7 @@ def _lock_goal(root: Path) -> None:
     key = str(root.resolve())
     if key in _LOCKS:
         return
-    path = root / ".plexus" / "lock"
+    path = vascular_state.lock_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     f = open(path, "w")
     try:
@@ -520,7 +521,7 @@ def _stray_paths(paths: list[str], touches: list[str] | None) -> list[str]:
 def _land(repo: str | Path, diff: str, feature_id: str) -> str:
     """Commit exactly the paths the diff touched — never `add -A`. The goal repo
     is a real working tree: it holds the user's unrelated edits and plexus's own
-    `runs/` episode dumps, and a blanket add would sweep both into the feature
+    `.vascular/plexus/runs/` episode dumps, and a blanket add would sweep both into the feature
     commit and into the goal's history."""
     paths = _diff_paths(repo, diff)
     subprocess.run(["git", "-C", str(repo), "apply", "--whitespace=nowarn"],
@@ -624,7 +625,7 @@ def _probe_regression_signal(repo: str, base: str, timeout: int, goal_id: str) -
     operator should decide, not plexus. Best-effort: any error here is silent, the
     run proceeds. Also flags a suite that already fully passes at base (nothing to
     regress → the regression axis is vacuous, not wrong)."""
-    marker = Path(repo) / ".plexus" / "verifiers-probed"
+    marker = vascular_state.verifiers_probed_path(repo)
     if marker.exists():
         return
     try:
@@ -679,7 +680,7 @@ def _mark_blocked(root, task_id: str, recs: list[dict],
         pass
 
 
-def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
+def run(spec, root: str | Path = ".", runs_dir: str | Path | None = None,
         candidates: int = 1, task_id: str = "") -> int:
     """Run the next ready task, or the one named.
 
@@ -693,6 +694,8 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
     of them lands on the board instead of the six I would have remembered.
     """
     root = Path(root)
+    if runs_dir is None:
+        runs_dir = vascular_state.runs_dir(root)
     if not task_id and _tasks.read(root):
         nxt = _tasks.next_task(root)
         if nxt is None:

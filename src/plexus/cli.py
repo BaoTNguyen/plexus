@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("export", help="labels.jsonl for marrow: acceptance joined to heart reward")
     s.add_argument("--root", default=".")
-    s.add_argument("-o", "--out", default=None, help="default .plexus/labels.jsonl")
+    s.add_argument("-o", "--out", default=None, help="default .vascular/plexus/labels.jsonl")
 
     s = sub.add_parser("prune", help="drop old episode dumps that nothing references")
     s.add_argument("--root", default=".")

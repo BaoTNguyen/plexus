@@ -14,6 +14,7 @@ import os
 import subprocess
 
 from plexus import ledger
+from plexus import vascular_state
 from plexus import run as _run
 from plexus.spec import load_spec
 
@@ -48,8 +49,8 @@ def test_review_rejected_feeds_findings_into_next_attempts_retry_context(
         '[agent]\nnetwork="api"\n[budgets]\nattempts_per_feature=2\n')
     spec = load_spec(repo)
 
-    plan_dir = repo / ".plexus"
-    plan_dir.mkdir()
+    plan_dir = vascular_state.plexus_dir(repo)
+    plan_dir.mkdir(parents=True)
     feat = {"plan_id": "p1", "id": "f1", "title": "f1", "spec": "do the thing",
             "acceptance": "true", "touches": ["src/two.py"], "contract": []}
     (plan_dir / "plan.jsonl").write_text(json.dumps(feat) + "\n")

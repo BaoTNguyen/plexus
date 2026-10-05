@@ -7,7 +7,7 @@ built the wrong thing correctly) exists only as a *join*, and nothing performs
 that join. Anything reading heart alone sees a clean pass.
 
 One row per episode, because the episode is what marrow trains on. Reward comes
-from `runs/<episode_id>/episode.json` rather than the ledger — the ledger
+from `.vascular/plexus/runs/<episode_id>/episode.json` rather than the ledger — the ledger
 records ids and points at heart for the rest (law 3, reference don't copy), so
 export is where the two are finally brought together. That also fixes the order
 of operations: export before `plexus prune`, or the rewards are already gone.
@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import ledger
+from . import ledger, vascular_state
 from .diagnose import _ESC_PHASE, classify_phase
 
 
@@ -87,8 +87,10 @@ def _label(row: dict) -> str:
     return "unscored"
 
 
-def build_rows(root: str | Path = ".", runs_dir: str = "runs") -> list[dict]:
+def build_rows(root: str | Path = ".", runs_dir: str | Path | None = None) -> list[dict]:
     root = Path(root)
+    if runs_dir is None:
+        runs_dir = vascular_state.runs_dir(root)
     recs = ledger.read(root)
     criteria = _criteria(recs)
     spec_hash = next((r.get("spec_hash") for r in recs if r["kind"] == "goal.started"), None)
@@ -158,10 +160,10 @@ def build_rows(root: str | Path = ".", runs_dir: str = "runs") -> list[dict]:
 
 
 def export(root: str | Path = ".", out_path: str | Path | None = None,
-           runs_dir: str = "runs") -> tuple[Path, int, dict]:
+           runs_dir: str | Path | None = None) -> tuple[Path, int, dict]:
     """Write labels.jsonl. Returns (path, rows, label counts)."""
     rows = build_rows(root, runs_dir)
-    path = Path(out_path) if out_path else Path(root) / ".plexus" / "labels.jsonl"
+    path = Path(out_path) if out_path else vascular_state.labels_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         for row in rows:

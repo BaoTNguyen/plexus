@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from plexus import diagnose, ledger, run
+from plexus import vascular_state
 from plexus.spec import GoalSpec
 
 
@@ -43,14 +44,14 @@ def _diff_adding_file(repo: Path, rel: str, content: str) -> str:
                           check=True, capture_output=True, text=True).stdout
     # `reset --hard` alone unstages and removes `rel` (new in the index, absent
     # from HEAD) -- no `clean -fd`, which would also sweep plexus's own
-    # untracked `.plexus/` state out of the working tree.
+    # untracked `.vascular/plexus/` state out of the working tree.
     subprocess.run(["git", "-C", str(repo), "reset", "--hard", "HEAD"],
                    check=True, capture_output=True)
     return diff
 
 
 def _write_plan(root: Path, feat: dict, plan_id: str = "plan-1") -> None:
-    p = root / ".plexus" / "plan.jsonl"
+    p = vascular_state.plexus_dir(root) / "plan.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps({"plan_id": plan_id, "task_id": "", **feat}) + "\n")
 

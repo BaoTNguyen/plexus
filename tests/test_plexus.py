@@ -14,6 +14,7 @@ here = Path(__file__).resolve()
 for p in (here.parents[1] / "src", here.parents[2] / "heart" / "src"):
     sys.path.insert(0, str(p))
 from plexus import events, ledger, observe  # noqa: E402
+from plexus import vascular_state  # noqa: E402
 
 root = tmp / "repo"
 
@@ -209,14 +210,14 @@ assert _diff_paths(g, diff) == ["seed.txt"], _diff_paths(g, diff)
 
 # meanwhile the tree is dirty the way a real repo is: plexus's own episode dumps
 # and an unrelated edit the user had open
-(g / "runs").mkdir()
-(g / "runs" / "episode.json").write_text("{}")
+vascular_state.runs_dir(g).mkdir(parents=True)
+(vascular_state.runs_dir(g) / "episode.json").write_text("{}")
 (g / "mine.txt").write_text("my unrelated work\n")
 
 _land(g, diff, "f1")
 committed = G("show", "--name-only", "--format=", "HEAD").split()
 assert committed == ["seed.txt"], f"land swept in extra files: {committed}"
-assert (g / "runs" / "episode.json").exists() and (g / "mine.txt").exists()
+assert (vascular_state.runs_dir(g) / "episode.json").exists() and (g / "mine.txt").exists()
 assert "mine.txt" in G("status", "--porcelain"), "unrelated edit was consumed"
 
 # --- approve gate: criteria must fail on the base commit ---
@@ -243,7 +244,7 @@ except ValueError as exc:
 gspec = GoalSpec(goal_id="lg", text="t", context="", suite="true",
                  attempts_per_feature=3, episodes_per_goal=25, agent="shell",
                  agent_cmd=None, timeout=30, spec_hash="deadbeef")
-(g / ".plexus").mkdir(exist_ok=True)
+vascular_state.plexus_dir(g).mkdir(parents=True, exist_ok=True)
 planmod.plan_path(g).write_text("\n".join(json.dumps(f) for f in [
     {"plan_id": "p", "id": "ok", "title": "t", "spec": "s", "acceptance": "test -f built.txt"},
     {"plan_id": "p", "id": "vacuous", "title": "t", "spec": "s", "acceptance": "true"},
@@ -289,8 +290,8 @@ _lock_goal(lroot)  # same process, same root: no-op, must not deny us our own lo
 # run` process is. Simulated here rather than forked: same flock semantics.
 other = tmp / "lockrepo2"
 other.mkdir(parents=True, exist_ok=True)
-(other / ".plexus").mkdir(parents=True, exist_ok=True)
-held = open(other / ".plexus" / "lock", "w")
+vascular_state.plexus_dir(other).mkdir(parents=True, exist_ok=True)
+held = open(vascular_state.lock_path(other), "w")
 fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
 try:
     _lock_goal(other)
@@ -315,11 +316,11 @@ from plexus.export import build_rows, export  # noqa: E402
 from plexus.prune import plan_prune, prune  # noqa: E402
 
 xr = tmp / "exportrepo"
-(xr / "runs").mkdir(parents=True, exist_ok=True)
+vascular_state.runs_dir(xr).mkdir(parents=True, exist_ok=True)
 
 
 def _episode(ep_id: str, outcome: str, reward, task_id: str) -> None:
-    d = xr / "runs" / ep_id
+    d = vascular_state.runs_dir(xr) / ep_id
     d.mkdir(parents=True, exist_ok=True)
     (d / "episode.json").write_text(json.dumps({
         "episode_id": ep_id, "task_id": task_id, "outcome": outcome,
@@ -377,21 +378,22 @@ assert "ep-b" in names, "a landed feature's episode is prunable"
 # ep-a failed but f1 later landed, so it is history the ledger already tells
 assert "ep-a" in names, names
 assert "--apply" in "\n".join(prune(xr, days=0))          # dry run by default
-assert (xr / "runs" / "ep-b" / "episode.json").exists()   # ...and deleted nothing
+assert (vascular_state.runs_dir(xr) / "ep-b" / "episode.json").exists()   # ...and deleted nothing
 prune(xr, days=0, apply=True)
-assert not (xr / "runs" / "ep-b").exists() and (xr / "runs" / "ep-c").exists()
+assert (not (vascular_state.runs_dir(xr) / "ep-b").exists()
+        and (vascular_state.runs_dir(xr) / "ep-c").exists())
 
 # prune refuses to delete an episode whose reward was never exported (no
 # labels.jsonl), and --force overrides
 ur = tmp / "unexported-repo"
-(ur / "runs" / "ep-x").mkdir(parents=True)
-(ur / "runs" / "ep-x" / "episode.json").write_text("{}")
+(vascular_state.runs_dir(ur) / "ep-x").mkdir(parents=True)
+(vascular_state.runs_dir(ur) / "ep-x" / "episode.json").write_text("{}")
 ledger.record("feature.landed", goal_id="g", feature_id="f", root=ur, episode_id="ep-x")
 refused = "\n".join(prune(ur, days=0, apply=True))
 assert "refusing to prune" in refused, refused
-assert (ur / "runs" / "ep-x").exists(), "unexported reward must survive without --force"
+assert (vascular_state.runs_dir(ur) / "ep-x").exists(), "unexported reward must survive without --force"
 prune(ur, days=0, apply=True, force=True)
-assert not (ur / "runs" / "ep-x").exists(), "--force deletes anyway"
+assert not (vascular_state.runs_dir(ur) / "ep-x").exists(), "--force deletes anyway"
 
 # --- planner parsing: prose around the JSON must not defeat it ---
 from plexus.plan import _parse_features  # noqa: E402
@@ -463,7 +465,7 @@ from types import SimpleNamespace  # noqa: E402
 from plexus.plan import amend, load_plan, plan_path  # noqa: E402
 
 ar = tmp / "amend-repo"
-(ar / ".plexus").mkdir(parents=True)
+vascular_state.plexus_dir(ar).mkdir(parents=True)
 plan_path(ar).write_text("\n".join(json.dumps(p) for p in [
     {"plan_id": "p1", "id": "f1", "title": "one", "spec": "s1", "acceptance": "false"},
     {"plan_id": "p1", "id": "f2", "title": "two", "spec": "s2", "acceptance": "false"},
@@ -542,7 +544,7 @@ assert registry.seed_upstream(["heart.x:Y"], "g-down", {"heart": str(up)}) == []
 
 # --- review hold-gate: held classes escalate before landing, then land once resolved
 from plexus.run import _held_before  # noqa: E402
-hr = tmp / "hold-repo"; (hr / ".plexus").mkdir(parents=True)
+hr = tmp / "hold-repo"; vascular_state.plexus_dir(hr).mkdir(parents=True)
 assert not _held_before([], "g", "f1")
 ledger.record("escalation.raised", goal_id="g", feature_id="f1", root=hr,
               reason_class="held_for_review", reason="sign off")

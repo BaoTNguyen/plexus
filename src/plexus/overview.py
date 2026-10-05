@@ -7,7 +7,7 @@ the ones the format refused. And nobody types these: they come out of a
 back-and-forth with a model, which produces prose, code fences and diagrams,
 not `constraints = ["...", "..."]`.
 
-So each section is one Markdown file under `.plexus/overview/`. Markdown carries
+So each section is one Markdown file under `.vascular/plexus/overview/`. Markdown carries
 prose, fenced code, mermaid diagrams and images without a schema, it diffs in
 git, a model can write it directly, and it is still a plain file you can edit in
 the terminal that is already open next to it.
@@ -20,6 +20,8 @@ import os
 import re
 import tempfile
 from pathlib import Path
+
+from . import vascular_state
 
 #: key, heading, and the one-line brief that tells a model what belongs here
 SECTIONS: tuple[tuple[str, str, str], ...] = (
@@ -44,7 +46,7 @@ KEYS = tuple(key for key, _, _ in SECTIONS)
 
 
 def overview_dir(root: str | Path = ".") -> Path:
-    return Path(root) / ".plexus" / "overview"
+    return vascular_state.overview_dir(root)
 
 
 def section_path(root: str | Path, key: str) -> Path:
@@ -114,7 +116,7 @@ def discuss_prompt(root: str | Path = ".") -> str:
     """
     lines = [
         "Help me work on this project's overview. Four standing documents, "
-        "in .plexus/overview/:",
+        "in .vascular/plexus/overview/:",
         "",
     ]
     for section in read(root):
