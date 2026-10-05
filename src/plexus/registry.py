@@ -205,10 +205,12 @@ _DEV_DIRS = ("~/.claude/skills", "~/.claude/plugins")
 
 def seat_secrets() -> Path:
     """Where seat tokens for the egress proxy's injector live: one file per
-    route (`anthropic`), mode 0600, mounted read-only into the proxy and
-    nowhere else. Beside heart's models.json because heart's proxy reads it."""
-    cfg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return cfg / "heart" / "secrets"
+    route (`anthropic`), mode 0600, plus the sentinel seed and `tls/`.
+    Mounted read-only into the proxy and nowhere else. heart computes the
+    same directory, because heart's proxy reads the sentinel seed plexus
+    writes. VASCULAR_HOME overrides the root."""
+    from . import vascular_paths
+    return vascular_paths.path("config", "heart", "secrets")
 
 
 def sentinel_seed() -> Path:

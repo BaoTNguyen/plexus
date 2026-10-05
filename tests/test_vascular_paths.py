@@ -101,3 +101,11 @@ def test_plexus_registry_overrides_vascular_home(monkeypatch):
         elsewhere = Path(d) / "elsewhere.json"
         monkeypatch.setenv("PLEXUS_REGISTRY", str(elsewhere))
         assert registry._registry_path() == elsewhere
+
+
+def test_seat_secrets_under_vascular_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("VASCULAR_HOME", str(tmp_path / "vascular"))
+    expected = tmp_path / "vascular" / "config" / "heart" / "secrets"
+    assert registry.seat_secrets() == expected
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    assert registry.seat_secrets() == expected

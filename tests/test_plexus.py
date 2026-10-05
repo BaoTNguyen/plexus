@@ -912,9 +912,9 @@ def test_the_allowlist_is_no_wider_than_the_box_can_use(monkeypatch, tmp_path):
         "opus": {"model": "claude-opus-5"},                  # no endpoint, no host
     }}))
     monkeypatch.setenv("VASCULAR_HOME", str(tmp_path))
-    # seat secrets still live under XDG_CONFIG_HOME; hide the box's own, or an
-    # injected seat drops its vendor host and the result depends on who runs this
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    # seat secrets live under VASCULAR_HOME too, so the box's own are hidden;
+    # otherwise an injected seat drops its vendor host and the result depends
+    # on who runs this
     monkeypatch.delenv("HEART_SANDBOX_ENV", raising=False)
     monkeypatch.setattr(sandbox, "_VENDOR_HOSTS", {"claude": ("api.anthropic.com",)})
     monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {"claude": 100.0})
@@ -927,7 +927,7 @@ def test_the_allowlist_is_no_wider_than_the_box_can_use(monkeypatch, tmp_path):
 def test_no_seat_means_no_vendor_host(monkeypatch, tmp_path):
     from plexus import sandbox
 
-    monkeypatch.setenv("VASCULAR_HOME", str(tmp_path))     # no models.json
+    monkeypatch.setenv("VASCULAR_HOME", str(tmp_path))     # no models.json, no seat
     monkeypatch.delenv("HEART_SANDBOX_ENV", raising=False)
     monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {})
     assert sandbox.allowlist() == []
@@ -975,7 +975,7 @@ def test_fix_creates_the_network_and_starts_the_proxy(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox, "local_model_hosts", lambda: [])
     monkeypatch.setattr(sandbox, "_running_config", lambda _p: None)
     monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {})
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))   # no seat token saved
+    monkeypatch.setenv("VASCULAR_HOME", str(tmp_path / "vascular"))   # no seat token saved
     monkeypatch.setattr(sandbox, "proxy_script", lambda: script)
     monkeypatch.setattr(sandbox, "reap", lambda: (0, 0))
     monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None)
@@ -998,12 +998,12 @@ def _seat_home(monkeypatch, tmp_path, token: bool):
     (home / ".codex").mkdir()
     (home / ".codex" / "auth.json").write_text("{}")
     monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("VASCULAR_HOME", str(tmp_path / "vascular"))
     monkeypatch.delenv("HEART_SANDBOX_HOME_FILES", raising=False)
     monkeypatch.delenv("PLEXUS_SEAT", raising=False)
     monkeypatch.delenv("PLEXUS_DEV_ENV", raising=False)
     if token:
-        secrets = home / ".config" / "heart" / "secrets"
+        secrets = tmp_path / "vascular" / "config" / "heart" / "secrets"
         secrets.mkdir(parents=True)
         (secrets / "anthropic").write_text("sk-ant-oat01-x")
     return home
@@ -1058,8 +1058,8 @@ def test_the_sentinel_seed_is_private_stable_and_made_only_when_injecting(monkey
     under running containers."""
     from plexus import registry
 
-    home = _seat_home(monkeypatch, tmp_path, token=False)
-    seed = home / ".config" / "heart" / "secrets" / "sentinel"
+    _seat_home(monkeypatch, tmp_path, token=False)
+    seed = tmp_path / "vascular" / "config" / "heart" / "secrets" / "sentinel"
     registry.seat_env()
     assert not seed.exists(), "no injected seat, no seed"
     seed.parent.mkdir(parents=True, mode=0o700)

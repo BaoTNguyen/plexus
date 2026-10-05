@@ -13,7 +13,7 @@ from plexus import cli, registry, run as run_mod, sandbox, spec
 def _isolate_and_stub(monkeypatch, tmp_path):
     # the CLI always calls registry.seat_env() first; keep it off real HOME
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("VASCULAR_HOME", str(tmp_path / "vascular"))
     monkeypatch.setenv("PLEXUS_DEV_ENV", "off")
     monkeypatch.setenv("HEART_SANDBOX", "1")
     monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None, raising=False)
