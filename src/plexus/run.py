@@ -557,9 +557,12 @@ def _open_pr(spec, root: Path, repo: str) -> str:
                        capture_output=True, text=True, check=True, timeout=120)
         body = ("Opened by `plexus run` for goal `" + spec.goal_id + "`.\n\n"
                 "## What to read\n\n```\n" + report(spec, root, repo) + "\n```\n")
-        view = subprocess.run(["gh", "pr", "view", branch, "--json", "url",
-                               "-q", ".url"], cwd=repo, capture_output=True,
-                              text=True, timeout=60)
+        # only an OPEN PR is ours to refresh: `gh pr view <branch>` also
+        # returns the branch's last merged one, and editing that rewrote a
+        # merged PR's description instead of opening a new PR
+        view = subprocess.run(["gh", "pr", "view", branch, "--json", "url,state",
+                               "-q", 'select(.state == "OPEN") | .url'], cwd=repo,
+                              capture_output=True, text=True, timeout=60)
         if view.returncode == 0 and view.stdout.strip():
             subprocess.run(["gh", "pr", "edit", branch, "--body", body], cwd=repo,
                            capture_output=True, text=True, timeout=60)
@@ -715,6 +718,9 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
     """Walk the plan feature by feature. 0 progressed or done, 1 escalated."""
     _lock_goal(root)
     repo = str(root)
+    # the queue's task id; the loop below reuses `task_id` for each episode's
+    # id, and marking that "landed" raised `no task` after goal.finished
+    board_task = task_id
     # reclaim any worktrees a previously killed run leaked (safe now: the lock we
     # just took means no live episode for this repo exists)
     try:  # lazy: reclaiming leaked worktrees is best-effort, import included
@@ -1056,8 +1062,8 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
             ledger.record("validation.automated_passed", goal_id=spec.goal_id,
                           root=root, task=task_id,
                           checks=list(spec.manual_checks), **spend)
-            if task_id:
-                _tasks.update(root, task_id, state="landed")
+            if board_task:
+                _tasks.update(root, board_task, state="landed")
             return 0
         ledger.record("goal.finished", goal_id=spec.goal_id, root=root,
                       outcome="scope_satisfied", task=task_id, **spend)
@@ -1066,10 +1072,10 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
             ledger.record("delivery.requested", goal_id=spec.goal_id, root=root,
                           task=task_id, result=note)
             print(note)
-        if task_id:
+        if board_task:
             # the PR number, so validation can say which tasks a PR carries
             found = re.search(r"/pull/(\d+)", note or "")
-            _tasks.update(root, task_id, state="landed",
+            _tasks.update(root, board_task, state="landed",
                           **({"pr": int(found.group(1))} if found else {}))
         return 0
     # ponytail: v0 escalates on regression; repair-feature synthesis is roadmap #2
