@@ -33,10 +33,11 @@ from heart.taskspec import TaskSpec
 
 from . import events, ledger, scope
 from . import tasks as _tasks
+from . import vascular_state
 from .plan import matches as _matches
 from .plan import execution_order, load_plan, parse_expect
 from .registry import seed_upstream
-from .review import classify, exec_surface, report, suspicious
+from .review import classify, cross_repo_callers, exec_surface, report, suspicious
 
 # heart episode outcomes that are mechanical failures — no valid applied diff to
 # judge a criterion against, so acceptance is skipped and it's a coding failure.
@@ -83,7 +84,7 @@ def _lock_goal(root: Path) -> None:
     key = str(root.resolve())
     if key in _LOCKS:
         return
-    path = root / ".plexus" / "lock"
+    path = vascular_state.lock_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     f = open(path, "w")
     try:
@@ -146,6 +147,45 @@ def _build(spec, task, candidates: int, roles, runs_dir) -> list[dict]:
     if not spec.orchestrate:
         return run_candidates(task, candidates, roles=roles, **kwargs)
     return [run_orchestrated(task, roles=roles, **kwargs) for _ in range(max(1, candidates))]
+
+
+_SANDBOX_START_ERROR = "sandbox failed to start"
+
+
+class _SandboxUnavailable(Exception):
+    """Raised when _build_sandbox_retrying exhausts its tries — the sandbox
+    itself never came up, so there is no episode to judge. Caught one frame
+    up, where the attempt number is still in scope, and turned into an
+    escalation rather than a feature.failed (this was never the agent's
+    fault)."""
+
+    def __init__(self, last_error: str):
+        super().__init__(last_error)
+        self.last_error = last_error
+
+
+def _build_sandbox_retrying(spec, task, candidates, roles, runs_dir,
+                            goal_id: str, feature_id: str, attempt: int,
+                            root: Path) -> list[dict]:
+    """_build, absorbing up to 3 total tries of a sandbox that failed to even
+    start. Each failure is logged as `sandbox.start_failed` instead of
+    `feature.failed` — it never reached the agent — and the attempt number
+    passed in is never advanced by this function. Any other RuntimeError, or
+    a 3rd straight sandbox-start failure, propagates for the caller to
+    escalate."""
+    last_error = ""
+    for _ in range(3):
+        try:
+            return _build(spec, task, candidates, roles, runs_dir)
+        except RuntimeError as e:
+            msg = str(e)
+            if not msg.startswith(_SANDBOX_START_ERROR):
+                raise
+            last_error = msg
+            ledger.record("sandbox.start_failed", goal_id=goal_id,
+                          feature_id=feature_id, root=root, attempt=attempt,
+                          error=msg[-300:])
+    raise _SandboxUnavailable(last_error)
 
 
 def _episode_cost(episodes: list[dict]) -> dict:
@@ -218,28 +258,136 @@ def _feature_state(recs: list[dict], goal_id: str,
     Returns (state, next_attempt, budget_used) where state is
     landed|escalated|open. Numbering is monotonic and never reused, but
     `escalation.resolved` resets the *budget* — so budget_used counts attempts
-    since the last resolution, not since the feature began (LEDGER)."""
+    since the last resolution, not since the feature began (LEDGER).
+
+    A `feature.started` whose only follow-up was one or more
+    `sandbox.start_failed` records (the sandbox itself never came up — no
+    `feature.failed`/`feature.landed` ever resulted) does not spend an
+    attempt: the agent never got a turn, so resuming after such a run must
+    not charge the feature for it."""
     landed = False
     max_attempt = 0
     open_escalations = 0
     budget_used = 0
+    pending = False       # an unflushed feature.started
+    had_sandbox_failure = False
+    had_seat_exhausted = False
+    had_failed = False
     for r in recs:
         if r.get("goal_id") != goal_id or r.get("feature_id") != feature_id:
             continue
-        if r["kind"] == "feature.landed":
-            landed = True
-        elif r["kind"] == "feature.started":
+        kind = r["kind"]
+        if kind == "feature.started":
+            if pending and not ((had_sandbox_failure or had_seat_exhausted)
+                                and not had_failed):
+                budget_used += 1
             max_attempt = max(max_attempt, int(r.get("attempt", 0)))
-            budget_used += 1
-        elif r["kind"] == "escalation.raised":
+            pending, had_sandbox_failure, had_seat_exhausted, had_failed = \
+                True, False, False, False
+        elif kind == "feature.landed":
+            landed = True
+            pending = False
+        elif kind == "feature.failed":
+            had_failed = True
+        elif kind == "sandbox.start_failed":
+            had_sandbox_failure = True
+        elif kind == "seat.exhausted":
+            had_seat_exhausted = True
+        elif kind == "escalation.raised":
             open_escalations += 1
-        elif r["kind"] == "escalation.resolved":
+        elif kind == "escalation.resolved":
             open_escalations -= 1
             budget_used = 0  # resolving hands the feature a fresh budget
+            pending = False
+    if pending and not ((had_sandbox_failure or had_seat_exhausted) and not had_failed):
+        budget_used += 1
     if landed:
         return "landed", max_attempt, budget_used
     state = "escalated" if open_escalations > 0 else "open"
     return state, max_attempt + 1, budget_used
+
+
+# A reset time, as literally written after "resets " / "try again at " /
+# "try again in ": a clock time (with optional am/pm and tz paren), a bare
+# HH:MM, a month/day, or a relative "in N units". Anything else ("a bit",
+# "later", "soon") is a transient rate-limit, not a seat-exhaustion signal.
+_TIME_EXPR = (
+    r"(?:\d{1,2}(?::\d{2})?\s*(?:am|pm)(?:\s*\([A-Za-z_/+-]+\))?"
+    r"|\d{1,2}:\d{2}(?:\s*(?:UTC|[A-Z]{2,4}))?"
+    r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}"
+    r"(?:,?\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?"
+    r"|in\s+\d+\s*(?:s|sec|seconds?|m|min|minutes?|h|hours?|d|days?))"
+)
+_CLAUDE_SEAT_RE = re.compile(
+    r"you've hit your.*limit.*?resets\s+(" + _TIME_EXPR + r")", re.IGNORECASE)
+_CODEX_TRIGGER_RE = re.compile(r"usage limit|rate limit", re.IGNORECASE)
+_CODEX_RESET_RE = re.compile(
+    r"(?:resets|try again at|try again in)\s+(" + _TIME_EXPR + r")", re.IGNORECASE)
+
+
+def _seat_exhaustion(log_text: str) -> str | None:
+    """Scan one role's agent log for Claude's or Codex/OpenAI's seat-exhaustion
+    phrasing. Returns the reset-time text if found, else None. A plain
+    rate-limit line with no reset time is a transient hiccup, not exhaustion,
+    so it is deliberately left unmatched (see LEDGER.md)."""
+    lines = log_text.splitlines()
+    for line in lines:
+        m = _CLAUDE_SEAT_RE.search(line)
+        if m:
+            return m.group(1)
+    for i, line in enumerate(lines):
+        if not _CODEX_TRIGGER_RE.search(line):
+            continue
+        window = line if i + 1 >= len(lines) else line + "\n" + lines[i + 1]
+        m = _CODEX_RESET_RE.search(window)
+        if m:
+            return m.group(1)
+    return None
+
+
+#: agents that run on a subscription seat (api:*, shell and local models don't)
+SEAT_AGENTS = ("claude", "codex")
+#: how far from the end of a role log the CLI's own limit error can sit
+SEAT_TAIL_LINES = 15
+
+
+def _check_seat_exhausted(ep: dict, runs_dir: Path, goal_id: str,
+                          feature_id: str, attempt: int, root: Path) -> bool:
+    """Scan every role's log of a normal-build episode for a seat-exhaustion
+    signal. On a match, record `seat.exhausted` (excluded from attempt
+    counting, see `_feature_state`) and `escalation.raised` with
+    reason_class=`seat_exhausted`, and report True so the caller stops the
+    run without charging the attempt or writing `feature.failed`.
+
+    Orchestrated runs and episodes with no role logs (empty `roles`) are the
+    caller's job to exclude — this only scans what it's handed."""
+    out = runs_dir / ep["episode_id"]
+    for role in ep.get("roles") or []:
+        name = role.get("role", "")
+        # Only a subscription seat can run out, and the CLI prints its limit
+        # error last. A whole-log scan of any role read the test role's
+        # (api:local) pytest output -- which printed sample limit messages
+        # from the seat tests themselves -- as a spent seat.
+        if role.get("agent", "").split(":")[0] not in SEAT_AGENTS:
+            continue
+        log_path = out / f"{name}.log"
+        try:
+            text = "\n".join(log_path.read_text().splitlines()[-SEAT_TAIL_LINES:])
+        except OSError:
+            continue
+        reset = _seat_exhaustion(text)
+        if reset is None:
+            continue
+        seat = f"{name}/{role.get('agent', '')}"
+        ledger.record("seat.exhausted", goal_id=goal_id, feature_id=feature_id,
+                      root=root, attempt=attempt, seat=seat, resets=reset)
+        ledger.record(
+            "escalation.raised", goal_id=goal_id, feature_id=feature_id,
+            root=root, reason_class="seat_exhausted",
+            reason=f"seat '{seat}' hit its usage limit, resets {reset}",
+            episode_ids=[ep["episode_id"]])
+        return True
+    return False
 
 
 def _verifier_tail(ep: dict, limit: int = 1000) -> str:
@@ -315,20 +463,20 @@ def _check_expect(cwd: str, expect: tuple[str, list[str]],
 
 
 def _resume_answer(recs: list[dict], goal_id: str, feature_id: str) -> str:
-    """If the feature's most recent block was answered (escalation.resolved after
-    a blocked_on_decision escalation), the text to inject into the next attempt —
-    warren's question_answered, in batch form."""
+    """If the feature's most recent escalation was answered (escalation.resolved
+    after an escalation.raised, any reason_class), the text to inject into the
+    next attempt — warren's question_answered, in batch form."""
     q = a = None
     for r in recs:
         if r.get("goal_id") != goal_id or r.get("feature_id") != feature_id:
             continue
         if r["kind"] == "escalation.raised":
-            q = r.get("reason") if r.get("reason_class") == "blocked_on_decision" else None
+            q = r.get("reason")
             a = None
         elif r["kind"] == "escalation.resolved":
             a = r.get("resolution")
     if q and a:
-        return (f"A decision you were blocked on has been answered.\n"
+        return (f"An escalation you raised has been answered.\n"
                 f"Question: {q}\nAnswer: {a}\nProceed with this decided.")
     return ""
 
@@ -373,7 +521,7 @@ def _stray_paths(paths: list[str], touches: list[str] | None) -> list[str]:
 def _land(repo: str | Path, diff: str, feature_id: str) -> str:
     """Commit exactly the paths the diff touched — never `add -A`. The goal repo
     is a real working tree: it holds the user's unrelated edits and plexus's own
-    `runs/` episode dumps, and a blanket add would sweep both into the feature
+    `.vascular/plexus/runs/` episode dumps, and a blanket add would sweep both into the feature
     commit and into the goal's history."""
     paths = _diff_paths(repo, diff)
     subprocess.run(["git", "-C", str(repo), "apply", "--whitespace=nowarn"],
@@ -409,9 +557,12 @@ def _open_pr(spec, root: Path, repo: str) -> str:
                        capture_output=True, text=True, check=True, timeout=120)
         body = ("Opened by `plexus run` for goal `" + spec.goal_id + "`.\n\n"
                 "## What to read\n\n```\n" + report(spec, root, repo) + "\n```\n")
-        view = subprocess.run(["gh", "pr", "view", branch, "--json", "url",
-                               "-q", ".url"], cwd=repo, capture_output=True,
-                              text=True, timeout=60)
+        # only an OPEN PR is ours to refresh: `gh pr view <branch>` also
+        # returns the branch's last merged one, and editing that rewrote a
+        # merged PR's description instead of opening a new PR
+        view = subprocess.run(["gh", "pr", "view", branch, "--json", "url,state",
+                               "-q", 'select(.state == "OPEN") | .url'], cwd=repo,
+                              capture_output=True, text=True, timeout=60)
         if view.returncode == 0 and view.stdout.strip():
             subprocess.run(["gh", "pr", "edit", branch, "--body", body], cwd=repo,
                            capture_output=True, text=True, timeout=60)
@@ -429,7 +580,7 @@ def _open_pr(spec, root: Path, repo: str) -> str:
         return f"could not open PR: {exc}"
 
 
-def _feature_prompt(spec, feat: dict, retry_context: str) -> str:
+def _feature_prompt(spec, feat: dict, retry_context: dict) -> str:
     parts = [feat["spec"]]
     if spec.context:
         parts.append(f"Repo context: {spec.context}")
@@ -450,9 +601,17 @@ def _feature_prompt(spec, feat: dict, retry_context: str) -> str:
         parts.append("The `expect:` block above is not documentation — that "
                      "command is executed after the acceptance check passes and "
                      "every line under it must appear in its output.")
-    if retry_context:
+    if retry_context.get("resume_answer"):
+        parts.append(retry_context["resume_answer"])
+    if retry_context.get("failure_tail"):
         parts.append("A previous attempt did not satisfy the acceptance check. "
-                     f"Its output tail:\n{retry_context}\nFix the cause.")
+                     f"Its output tail:\n{retry_context['failure_tail']}\nFix the cause.")
+    if retry_context.get("review_findings"):
+        lines = "\n".join(
+            f"- [{f.get('severity')}] {f.get('file')}:{f.get('line')}: {f.get('claim')}"
+            for f in retry_context["review_findings"])
+        parts.append("A previous attempt was rejected by review. Findings:\n"
+                     f"{lines}\nAddress these before the next attempt.")
     parts.append(
         "If a decision is genuinely missing or the requirements are ambiguous or "
         "contradictory, do not guess. Write a single line "
@@ -469,7 +628,7 @@ def _probe_regression_signal(repo: str, base: str, timeout: int, goal_id: str) -
     operator should decide, not plexus. Best-effort: any error here is silent, the
     run proceeds. Also flags a suite that already fully passes at base (nothing to
     regress → the regression axis is vacuous, not wrong)."""
-    marker = Path(repo) / ".plexus" / "verifiers-probed"
+    marker = vascular_state.verifiers_probed_path(repo)
     if marker.exists():
         return
     try:
@@ -524,7 +683,7 @@ def _mark_blocked(root, task_id: str, recs: list[dict],
         pass
 
 
-def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
+def run(spec, root: str | Path = ".", runs_dir: str | Path | None = None,
         candidates: int = 1, task_id: str = "") -> int:
     """Run the next ready task, or the one named.
 
@@ -538,6 +697,8 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path = "runs",
     of them lands on the board instead of the six I would have remembered.
     """
     root = Path(root)
+    if runs_dir is None:
+        runs_dir = vascular_state.runs_dir(root)
     if not task_id and _tasks.read(root):
         nxt = _tasks.next_task(root)
         if nxt is None:
@@ -557,6 +718,9 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
     """Walk the plan feature by feature. 0 progressed or done, 1 escalated."""
     _lock_goal(root)
     repo = str(root)
+    # the queue's task id; the loop below reuses `task_id` for each episode's
+    # id, and marking that "landed" raised `no task` after goal.finished
+    board_task = task_id
     # reclaim any worktrees a previously killed run leaked (safe now: the lock we
     # just took means no live episode for this repo exists)
     try:  # lazy: reclaiming leaked worktrees is best-effort, import included
@@ -624,7 +788,8 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
             return 1
 
         # if a prior block was just answered, carry the answer into the next attempt
-        retry_context = _resume_answer(recs, spec.goal_id, fid)
+        resume_answer = _resume_answer(recs, spec.goal_id, fid)
+        retry_context: dict = {"resume_answer": resume_answer} if resume_answer else {}
         landed = False
         last_episode_ids: list[str] = []
         attempt = next_attempt
@@ -663,15 +828,39 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 # reviewer REJECT blocks the land (run.py already reads
                 # review_verdict below). Solo turn otherwise.
                 roles = _roles(spec)
-                cands = _build(spec, task, candidates, roles, root / runs_dir)
+                cands = _build_sandbox_retrying(spec, task, candidates, roles,
+                                                root / runs_dir, spec.goal_id,
+                                                fid, attempt, root)
                 ep = best_episode(cands)
                 attempt_cost = _episode_cost(cands)  # best-of-N pays for all N
+            except _SandboxUnavailable as exc:
+                ledger.record(
+                    "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
+                    root=root, reason_class="sandbox_unavailable",
+                    reason=f"sandbox failed to start 3 times in a row: "
+                           f"{exc.last_error}",
+                    episode_ids=last_episode_ids)
+                return 1
             finally:
                 os.environ.pop("PLEXUS_GOAL_ID", None)
                 os.environ.pop("PLEXUS_FEATURE_ID", None)
             ep_id = ep["episode_id"]
             last_episode_ids.append(ep_id)
             ep_outcome = ep["outcome"]
+
+            # Seat exhaustion (weekly/usage limit hit mid-role) is an infra
+            # stop, not a coding failure — same family as sandbox.start_failed.
+            # Scanned across every candidate this attempt built, best-of-N or
+            # not, since a losing candidate hit the same seat the winner did.
+            # Scoped to the normal build path only: an orchestrated run's
+            # decomposer/merge/repair roles are a follow-up task's problem, not
+            # this one's, and a candidate with no roles has no log to read.
+            if not spec.orchestrate and any(
+                    _check_seat_exhausted(c, root / runs_dir, spec.goal_id,
+                                         fid, attempt, root)
+                    for c in cands if c.get("roles")):
+                return 1
+
             # Distil the sandbox's refusals now, while the episode's events are
             # still in the journal. The journal rotates on a day scale and
             # plexus reasons on a multi-week one, so a later scan would return
@@ -710,7 +899,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                               failure_class=_MECHANICAL.get(ep_outcome, "episode_error"),
                               episode_outcome=ep_outcome, acceptance_passed=None,
                               reason=f"outcome={ep_outcome}", **attempt_cost)
-                retry_context = _verifier_tail(ep)
+                retry_context = {**retry_context, "failure_tail": _verifier_tail(ep)}
                 attempt += 1
                 continue
 
@@ -731,6 +920,29 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
             # `unverified` counts as "nothing regressed": there was no suite to
             # regress, and refusing to land would deadlock every test-less repo.
             if acc_passed and ep_outcome in ("pass", "unverified") and review != "reject":
+                # a review that never ran is not the same as a review that
+                # passed: pipeline mode promised a reviewer, so anything here
+                # but "approve" (None, "", a crash) means the role never
+                # delivered a verdict -- not that it cleared the diff.
+                if roles is not None and review != "approve":
+                    review_roles = [r for r in ep.get("roles", [])
+                                     if r.get("role", "").startswith("review")]
+                    bad = next((r for r in review_roles
+                                if r.get("timed_out") or r.get("exit_code")), None)
+                    if bad is None and review_roles:
+                        review_note = "review role did not produce a verdict"
+                    elif bad is not None and bad.get("timed_out"):
+                        review_note = "review role timed out"
+                    elif bad is not None:
+                        review_note = f"review role exited {bad['exit_code']}"
+                    else:
+                        review_note = "review role did not run"
+                    ledger.record(
+                        "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
+                        root=root, reason_class="held_for_review",
+                        reason=f"acceptance passed but the review did not run: {review_note}",
+                        episode_ids=[ep_id])
+                    return 1
                 # Software-factory boundary: a green feature whose risk class is
                 # on the goal's review-hold list waits for a human sign-off
                 # instead of auto-landing. Only on the first pass — a prior hold
@@ -743,6 +955,11 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 flags = suspicious(repo, base, diff)
                 if cls not in spec.review_hold:
                     cls = "exec" if runs_here else "suspect" if flags else cls
+                # a name this diff changed that a sibling checkout still refers
+                # to is a break plexus can't see from one repo alone
+                callers = cross_repo_callers(repo, base, diff)
+                if cls not in spec.review_hold and callers:
+                    cls = "boundary"
                 if cls in spec.review_hold and not _held_before(
                         ledger.read(root), spec.goal_id, fid):
                     ledger.record(
@@ -754,7 +971,9 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                                + (f" (runs on your machine: {', '.join(runs_here[:5])})"
                                   if runs_here else "")
                                + (f" (new in this diff: {'; '.join(flags[:5])})"
-                                  if flags else ""),
+                                  if flags else "")
+                               + (f" (called from: {', '.join(callers[:10])})"
+                                  if callers else ""),
                         episode_ids=[ep_id])
                     return 1
                 # Scope gate, last thing before the commit exists. Not a retry:
@@ -774,6 +993,22 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 ledger.record("feature.landed", goal_id=spec.goal_id, feature_id=fid,
                               root=root, attempt=attempt, task_id=task_id,
                               episode_id=ep_id, commit=commit, **attempt_cost)
+                # an approve verdict still carries findings -- a blocker never
+                # ships, but a concern the reviewer judged "not fatal" lands
+                # anyway, so record it instead of letting the verdict word
+                # discard it (see heart's review.py docstring).
+                if review == "approve":
+                    for finding in ep.get("review_findings", []):
+                        if finding.get("severity") not in ("concern", "blocker"):
+                            continue
+                        ledger.record(
+                            "review.concern", goal_id=spec.goal_id, feature_id=fid,
+                            root=root, severity=finding["severity"],
+                            file=finding.get("file"), line=finding.get("line"),
+                            claim=finding.get("claim"))
+                        print(f"review concern [{finding['severity']}] {fid} "
+                              f"{finding.get('file')}:{finding.get('line')}: "
+                              f"{finding.get('claim')}")
                 landed = True
                 break
 
@@ -798,7 +1033,15 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                                   f"acceptance={'pass' if acc_passed else 'fail'}")
                                  + f" regression={'FAIL' if ep_outcome == 'fail' else 'ok'}",
                           **attempt_cost)
-            retry_context = acc_tail if not acc_passed else _verifier_tail(ep)
+            if review == "reject":
+                findings = [
+                    {"severity": f.get("severity"), "file": f.get("file"),
+                     "line": f.get("line"), "claim": f.get("claim")}
+                    for f in ep.get("review_findings", [])]
+                retry_context = {**retry_context, "review_findings": findings}
+            else:
+                tail = acc_tail if not acc_passed else _verifier_tail(ep)
+                retry_context = {**retry_context, "failure_tail": tail}
             attempt += 1
 
         if not landed:
@@ -819,8 +1062,8 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
             ledger.record("validation.automated_passed", goal_id=spec.goal_id,
                           root=root, task=task_id,
                           checks=list(spec.manual_checks), **spend)
-            if task_id:
-                _tasks.update(root, task_id, state="landed")
+            if board_task:
+                _tasks.update(root, board_task, state="landed")
             return 0
         ledger.record("goal.finished", goal_id=spec.goal_id, root=root,
                       outcome="scope_satisfied", task=task_id, **spend)
@@ -829,10 +1072,10 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
             ledger.record("delivery.requested", goal_id=spec.goal_id, root=root,
                           task=task_id, result=note)
             print(note)
-        if task_id:
+        if board_task:
             # the PR number, so validation can say which tasks a PR carries
             found = re.search(r"/pull/(\d+)", note or "")
-            _tasks.update(root, task_id, state="landed",
+            _tasks.update(root, board_task, state="landed",
                           **({"pr": int(found.group(1))} if found else {}))
         return 0
     # ponytail: v0 escalates on regression; repair-feature synthesis is roadmap #2

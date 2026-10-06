@@ -19,6 +19,7 @@ from heart.taskspec import TaskSpec
 from . import ledger
 from . import overview as _overview
 from . import tasks as _tasks
+from . import vascular_state
 
 PLAN_PROMPT = """\
 You are planning a software goal that will be built one feature at a time by a
@@ -115,8 +116,8 @@ def plan_path(root: str | Path = ".", task_id: str = "") -> Path:
     of work rather than to the project — the project has an overview, not a
     feature list. The unsuffixed path is what repos written before tasks used,
     and is still what `plexus plan` with no task writes."""
-    base = Path(root) / ".plexus"
-    return base / "plans" / f"{task_id}.jsonl" if task_id else base / "plan.jsonl"
+    return (vascular_state.plans_dir(root) / f"{task_id}.jsonl" if task_id
+            else vascular_state.plan_jsonl_path(root))
 
 
 def _parse_features(raw: str) -> list[dict]:
@@ -189,14 +190,14 @@ def _retrieved(root: str | Path, prompt: str, lane: str = "") -> str:
 
     On the host the planner's retrieval arrives through the UserPromptSubmit
     hook in the checkout's gitignored .claude/settings.local.json, which calls
-    .arteries/hooks/hook-observe.sh by absolute host path. Neither exists inside
+    .vascular/arteries/hooks/hook-observe.sh by absolute host path. Neither exists inside
     a container, so a contained planner would plan with no memory and nothing
     would say so. Running the same hook here, with the same prompt, gives the
     same gate and the same packet -- and records the turn, as the hook would.
 
     Never raises: a planner without memory is worse, not broken.
     """
-    hook = Path(root) / ".arteries" / "hooks" / "hook-observe.sh"
+    hook = vascular_state.repo_dir(root, "arteries") / "hooks" / "hook-observe.sh"
     if not hook.is_file():
         return ""
     try:
@@ -214,9 +215,9 @@ def _retrieved(root: str | Path, prompt: str, lane: str = "") -> str:
 
 
 def make_plan(spec, root: str | Path = ".", task_id: str = "") -> list[dict]:
-    out = Path(root) / ".plexus"
+    out = vascular_state.plexus_dir(root)
     out.mkdir(parents=True, exist_ok=True)
-    log = out / "plan.log"
+    log = vascular_state.plan_log_path(root)
     task = None
     if task_id:
         task = next((t for t in _tasks.read(root) if t["id"] == task_id), None)
@@ -407,11 +408,16 @@ def amend(spec, feature_id: str, root: str | Path = ".",
     """Fix one not-yet-landed feature's plan in place.
 
     The plan is otherwise immutable once armed, so a criterion discovered wrong
-    mid-run used to mean hand-editing .plexus/plan.jsonl. This rewrites the one
+    mid-run used to mean hand-editing .vascular/plexus/plan.jsonl. This rewrites the one
     feature's fields and records plan.amended. A landed feature is refused — its
     commit already shipped, so amending it would be a lie. Re-run `plexus run`
-    after amending; the feature reopens against the new criterion."""
-    plan = load_plan(root)
+    after amending; the feature reopens against the new criterion.
+
+    A task's feature ids are namespaced `<task>:<feature>` (see make_plan), so
+    the id alone says which plan to rewrite. Before this, amend only knew the
+    project plan and answered "no plan" for every task feature."""
+    task_id = feature_id.split(":", 1)[0] if ":" in feature_id else ""
+    plan = load_plan(root, task_id)
     feat = next((f for f in plan if f["id"] == feature_id), None)
     if feat is None:
         raise SystemExit(f"no feature {feature_id!r} in the plan")
@@ -436,11 +442,11 @@ def amend(spec, feature_id: str, root: str | Path = ".",
             "nothing to amend — pass --acceptance / --spec / --title / --touches")
     feat.update(changes)
 
-    with open(plan_path(root), "w", encoding="utf-8") as f:
+    with open(plan_path(root, task_id), "w", encoding="utf-8") as f:
         for p in plan:
             f.write(json.dumps(p) + "\n")
     ledger.record("plan.amended", goal_id=spec.goal_id, feature_id=feature_id,
-                  root=root, changed=sorted(changes))
+                  root=root, task=task_id, changed=sorted(changes))
     return f"amended {feature_id}: {', '.join(sorted(changes))} — re-run `plexus run`"
 
 
@@ -452,7 +458,7 @@ def approve(spec, root: str | Path = ".", approver: str = "human",
         raise SystemExit(
             "plan not approved — these acceptance criteria are not usable ground truth:\n"
             + "\n".join(f"  {fid}: {why}" for fid, why in bad)
-            + "\nFix them in .plexus/plan.jsonl, or `plexus approve --waive` to accept.")
+            + "\nFix them in .vascular/plexus/plan.jsonl, or `plexus approve --waive` to accept.")
     ledger.record("plan.approved", goal_id=spec.goal_id, root=root,
                   plan_id=plan_id, task=task_id, approver=approver,
                   waived=[fid for fid, _ in bad])

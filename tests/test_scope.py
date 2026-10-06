@@ -19,12 +19,13 @@ from unittest.mock import patch
 import pytest
 
 from plexus import ledger, scope
+from plexus import vascular_state
 
 
 @pytest.fixture
 def root():
     with tempfile.TemporaryDirectory() as tmp:
-        (Path(tmp) / ".plexus").mkdir()
+        vascular_state.plexus_dir(Path(tmp)).mkdir(parents=True)
         yield Path(tmp)
 
 

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .diagnose import phase_counts
 from .ledger import read
+from . import vascular_state
 
 
 def _spend(records: list[dict]) -> tuple[float, int, int, int]:
@@ -84,7 +85,7 @@ def _silent_layers(recs: list[dict], root: str, sample: int = 10) -> str | None:
     # silence has two causes with opposite fixes, and telling them apart matters:
     # an unwired repo needs installing, a wired one that went quiet is usually
     # Postgres being unreachable (capillaries retrieval cannot run without it).
-    if not (Path(root) / ".arteries").is_dir():
+    if not vascular_state.repo_dir(root, "arteries").is_dir():
         return line + f"repo not wired; run `arteries setup claude --cwd {root}`"
     return line + "repo is wired, so check `plexus stack` for degraded writes"
 
