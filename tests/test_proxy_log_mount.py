@@ -37,3 +37,38 @@ def test_running_proxy_without_log_mount_differs_from_wanted(monkeypatch, vhome)
     assert have["log"] is False and want["log"] is True
     assert {k: v for k, v in have.items() if k != "log"} == \
            {k: v for k, v in want.items() if k != "log"}
+
+
+def _stub_agreeing(monkeypatch, tmp_path, mounts):
+    """An injected seat, and a canned inspect line whose ALLOW/DENY/ports
+    already agree with what's wanted -- only the mounts are under test."""
+    monkeypatch.setattr("plexus.registry.injected_seats", lambda: {"anthropic"})
+    monkeypatch.setattr(sandbox, "_docker", lambda *a, **k: (
+        0, f"true\t{tmp_path}/proxy.py=/proxy.py {mounts}\t"
+           f"ALLOW=a.example:443\nDENY=b.example:443\nINJECT_PORT={sandbox.INJECT_PORT}\n"))
+
+
+def test_running_proxy_with_moved_secrets_differs_from_wanted(monkeypatch, tmp_path, vhome):
+    """F72: /secrets bound to an old secrets dir is stale, even though a
+    /secrets mount exists -- doctor --fix must see it as differing."""
+    moved = tmp_path / "old-secrets"
+    _stub_agreeing(monkeypatch, tmp_path, f"{moved}=/secrets {vhome}/log/heart=/log")
+    have = sandbox._running_config("egress")
+    want = sandbox._wanted_config("a.example:443", "b.example:443")
+    assert have["secrets"] == str(moved)
+    assert want["secrets"] == str(tmp_path / "secrets")
+    assert have != want
+
+
+def test_running_proxy_with_matching_secrets_source_and_log_equals_wanted(
+        monkeypatch, tmp_path, vhome):
+    _stub_agreeing(monkeypatch, tmp_path,
+                   f"{tmp_path / 'secrets'}=/secrets {vhome}/log/heart=/log")
+    have = sandbox._running_config("egress")
+    want = sandbox._wanted_config("a.example:443", "b.example:443")
+    assert have == want
+
+
+def test_running_proxy_without_secrets_mount_reports_empty_source(monkeypatch, tmp_path, vhome):
+    _stub_agreeing(monkeypatch, tmp_path, f"{vhome}/log/heart=/log")
+    assert sandbox._running_config("egress")["secrets"] == ""
