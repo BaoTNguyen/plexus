@@ -1003,7 +1003,7 @@ def _seat_home(monkeypatch, tmp_path, token: bool):
     monkeypatch.delenv("PLEXUS_SEAT", raising=False)
     monkeypatch.delenv("PLEXUS_DEV_ENV", raising=False)
     if token:
-        secrets = tmp_path / "vascular" / "config" / "heart" / "secrets"
+        secrets = tmp_path / "vascular" / "secrets" / "heart"
         secrets.mkdir(parents=True)
         (secrets / "anthropic").write_text("sk-ant-oat01-x")
     return home
@@ -1059,7 +1059,7 @@ def test_the_sentinel_seed_is_private_stable_and_made_only_when_injecting(monkey
     from plexus import registry
 
     _seat_home(monkeypatch, tmp_path, token=False)
-    seed = tmp_path / "vascular" / "config" / "heart" / "secrets" / "sentinel"
+    seed = tmp_path / "vascular" / "secrets" / "heart" / "sentinel"
     registry.seat_env()
     assert not seed.exists(), "no injected seat, no seed"
     seed.parent.mkdir(parents=True, mode=0o700)

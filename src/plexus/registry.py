@@ -208,9 +208,9 @@ def seat_secrets() -> Path:
     route (`anthropic`), mode 0600, plus the sentinel seed and `tls/`.
     Mounted read-only into the proxy and nowhere else. heart computes the
     same directory, because heart's proxy reads the sentinel seed plexus
-    writes. VASCULAR_HOME overrides the root."""
+    writes: <VASCULAR_HOME or ~/.vascular>/secrets/heart."""
     from . import vascular_paths
-    return vascular_paths.path("config", "heart", "secrets")
+    return vascular_paths.path("secrets", "heart")
 
 
 def sentinel_seed() -> Path:
@@ -225,7 +225,11 @@ def sentinel_seed() -> Path:
     """
     path = seat_secrets() / "sentinel"
     if not path.is_file():
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # mkdir's mode only reaches the leaf, and umask masks it: set each level
+        for d in (path.parent.parent, path.parent):
+            if not d.is_dir():
+                d.mkdir(parents=True, mode=0o700)
+                d.chmod(0o700)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(secrets.token_urlsafe(32))

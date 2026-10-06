@@ -66,7 +66,7 @@ plexus doctor                        # what this box still needs to run agents
 ## Seats and the credential injector
 
 Each seat's secrets live under `seat_secrets()`, rooted at
-`~/.vascular/config/heart/secrets` (`VASCULAR_HOME` overrides the
+`~/.vascular/secrets/heart` (`VASCULAR_HOME` overrides the
 `~/.vascular` root) — the credential injector reads from there rather than
 trusting anything the sandboxed agent process can see or set.
 
