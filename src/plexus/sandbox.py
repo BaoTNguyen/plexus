@@ -170,9 +170,10 @@ def _running_config(proxy: str, running_only: bool = True) -> dict | None:
     """The settings a proxy is running with -- ALLOW, INJECT_PORT, whether the
     seat secrets are mounted -- or None if it is not running. The whole config
     is compared, not ALLOW alone: a token saved after the proxy started needs
-    the proxy restarted with the mount, even though its allowlist is current."""
+    the proxy restarted with the mount, even though its allowlist is current.
+    `secrets` is the /secrets mount's source, so a moved secrets dir differs."""
     rc, out = _docker("inspect", proxy, "--format",
-                      "{{.State.Running}}\t{{range .Mounts}}{{.Destination}} {{end}}"
+                      "{{.State.Running}}\t{{range .Mounts}}{{.Source}}={{.Destination}} {{end}}"
                       "\t{{range .Config.Env}}{{println .}}{{end}}")
     if rc != 0:
         return None
@@ -185,9 +186,11 @@ def _running_config(proxy: str, running_only: bool = True) -> dict | None:
         key, _, value = line.partition("=")
         if key in have:
             have[key] = value.strip()
-    have["secrets"] = "/secrets" in mounts.split()
-    have["codex"] = "/codex" in mounts.split()
-    have["log"] = "/log" in mounts.split()
+    # rpartition: a source path may itself contain "="
+    src = {d: s for s, _, d in (m.rpartition("=") for m in mounts.split())}
+    have["secrets"] = src.get("/secrets", "")
+    have["codex"] = "/codex" in src
+    have["log"] = "/log" in src
     return have
 
 
@@ -206,7 +209,7 @@ def _wanted_config(allow: str, deny: str = "") -> dict:
     # and without it the injector accepts nothing
     return {"ALLOW": allow, "DENY": deny, "INJECT_PORT": INJECT_PORT if injected else "",
             "INJECT_TLS_PORT": _inject_tls_port() if tls_ready else "",
-            "secrets": bool(injected), "codex": "chatgpt" in injected,
+            "secrets": str(seat_secrets()) if injected else "", "codex": "chatgpt" in injected,
             "log": True}
 
 
