@@ -17,15 +17,26 @@ def test_home_respects_VASCULAR_HOME(monkeypatch):
         assert vascular_paths.home() == Path(d)
 
 
-def test_home_defaults_to_dot_vascular_in_home(monkeypatch):
+def test_home_defaults_to_dot_vascular_in_home(monkeypatch, tmp_path):
     monkeypatch.delenv("VASCULAR_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
     h = vascular_paths.home()
     assert h == Path.home() / ".vascular"
 
 
-def test_KINDS_is_a_tuple_of_five(monkeypatch):
-    assert vascular_paths.KINDS == ("config", "state", "cache", "data", "backups")
-    assert len(vascular_paths.KINDS) == 5
+def test_KINDS_is_the_eight_kinds_in_order(monkeypatch, tmp_path):
+    monkeypatch.setenv("VASCULAR_HOME", str(tmp_path))
+    assert vascular_paths.KINDS == (
+        "config", "secrets", "state", "spool", "log", "cache", "data", "backups")
+    assert len(vascular_paths.KINDS) == 8
+
+
+def test_new_kinds_resolve_under_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("VASCULAR_HOME", str(tmp_path))
+    for kind in ("secrets", "spool", "log"):
+        p = vascular_paths.path(kind, "x")
+        assert p == vascular_paths.home() / kind / "x"
+        assert p == tmp_path / kind / "x"
 
 
 def test_path_returns_correct_structure(monkeypatch):
@@ -35,7 +46,8 @@ def test_path_returns_correct_structure(monkeypatch):
         assert p == Path(d) / "config" / "myapp" / "settings" / "local.toml"
 
 
-def test_path_refuses_unknown_kind():
+def test_path_refuses_unknown_kind(monkeypatch, tmp_path):
+    monkeypatch.setenv("VASCULAR_HOME", str(tmp_path))
     with pytest.raises(ValueError, match="unknown kind 'foobar'"):
         vascular_paths.path("foobar", "myapp")
 
@@ -53,11 +65,11 @@ def test_journal_dir_uses_ENV(monkeypatch):
         assert vascular_paths.journal_dir() == Path(d)
 
 
-def test_journal_dir_defaults_to_heart_state(monkeypatch, tmp_path):
+def test_journal_dir_defaults_to_events_spool(monkeypatch, tmp_path):
     with tempfile.TemporaryDirectory() as d:
         monkeypatch.delenv("EVENT_JOURNAL_DIR", raising=False)
         monkeypatch.setenv("VASCULAR_HOME", d)
-        expected = Path(d) / "state" / "heart" / "events"
+        expected = Path(d) / "spool" / "events"
         assert vascular_paths.journal_dir() == expected
 
 
