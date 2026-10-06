@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -117,7 +118,21 @@ def test_plexus_registry_overrides_vascular_home(monkeypatch):
 
 def test_seat_secrets_under_vascular_home(monkeypatch, tmp_path):
     monkeypatch.setenv("VASCULAR_HOME", str(tmp_path / "vascular"))
-    expected = tmp_path / "vascular" / "config" / "heart" / "secrets"
+    expected = tmp_path / "vascular" / "secrets" / "heart"
     assert registry.seat_secrets() == expected
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     assert registry.seat_secrets() == expected
+
+
+def test_sentinel_seed_locks_down_both_secret_dirs(monkeypatch, tmp_path):
+    home = tmp_path / "vascular"
+    monkeypatch.setenv("VASCULAR_HOME", str(home))
+    old = os.umask(0o022)
+    try:
+        seed = registry.sentinel_seed()
+    finally:
+        os.umask(old)
+    assert seed == home / "secrets" / "heart" / "sentinel"
+    assert stat.S_IMODE((home / "secrets").stat().st_mode) == 0o700
+    assert stat.S_IMODE((home / "secrets" / "heart").stat().st_mode) == 0o700
+    assert stat.S_IMODE(seed.stat().st_mode) == 0o600
