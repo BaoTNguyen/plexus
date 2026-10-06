@@ -86,7 +86,7 @@ def test_start_proxy_passes_inject_tls_port_when_wanted(monkeypatch, tmp_path):
     monkeypatch.setattr("plexus.registry.seat_secrets", lambda: tmp_path)
     monkeypatch.setattr("plexus.registry.sentinel_seed", lambda: tmp_path / "sentinel")
     want = {"ALLOW": "", "DENY": "", "INJECT_PORT": "8889", "INJECT_TLS_PORT": "8890",
-            "secrets": True, "codex": True}
+            "secrets": True, "codex": True, "log": False}
     sandbox._start_proxy("egress", sandbox.NETWORK, want, tmp_path / "proxy.py")
     run = next(c for c in calls if c[0] == "run")
     assert "INJECT_TLS_PORT=8890" in run
@@ -98,7 +98,7 @@ def test_start_proxy_omits_inject_tls_port_when_not_wanted(monkeypatch, tmp_path
     monkeypatch.setattr("plexus.registry.seat_secrets", lambda: tmp_path)
     monkeypatch.setattr("plexus.registry.sentinel_seed", lambda: tmp_path / "sentinel")
     want = {"ALLOW": "", "DENY": "", "INJECT_PORT": "", "INJECT_TLS_PORT": "",
-            "secrets": False, "codex": False}
+            "secrets": False, "codex": False, "log": False}
     sandbox._start_proxy("egress", sandbox.NETWORK, want, tmp_path / "proxy.py")
     run = next(c for c in calls if c[0] == "run")
     assert not any(a.startswith("INJECT_TLS_PORT=") for a in run)
