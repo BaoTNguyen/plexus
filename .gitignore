@@ -8,6 +8,7 @@ __pycache__/
 # plexus runtime state — repo-local, regenerated, not source
 .plexus/
 runs/
+.vascular/
 
 # stack integration artifacts copied into working repos
 .arteries/

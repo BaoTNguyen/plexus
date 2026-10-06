@@ -21,6 +21,7 @@ here = Path(__file__).resolve()
 for p in (here.parents[1] / "src", here.parents[2] / "heart" / "src"):
     sys.path.insert(0, str(p))
 from plexus import ledger, review  # noqa: E402
+from plexus import vascular_state
 from plexus.plan import matches  # noqa: E402
 from plexus.run import _stray_paths  # noqa: E402
 
@@ -87,7 +88,7 @@ def commit(files: dict[str, str], msg: str) -> str:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(body)
     # pathspec, not `add -A`: run.py's _land commits exactly the diff's paths,
-    # and once .plexus/ exists a blanket add would sweep the ledger into the
+    # and once .vascular/plexus/ exists a blanket add would sweep the ledger into the
     # feature commit and make every later feature look like a scope violation
     subprocess.run([*git, "add", "--", *files], check=True)
     subprocess.run([*git, "commit", "-qm", msg, "--", *files], check=True)
@@ -101,8 +102,8 @@ c1 = commit({"src/one.py": "def alpha():\n    return 1\n"}, "plexus: land f1")
 c2 = commit({"src/two.py": "def beta():\n    return 2\n\n\ndef gamma():\n    return 3\n",
              "src/one.py": "def alpha():\n    return 99\n"}, "plexus: land f2")
 
-plan_dir = repo / ".plexus"
-plan_dir.mkdir(exist_ok=True)
+plan_dir = vascular_state.plexus_dir(repo)
+plan_dir.mkdir(parents=True, exist_ok=True)
 plan = [
     {"plan_id": "p1", "id": "f1", "title": "alpha", "spec": "s", "acceptance": "true",
      "touches": ["src/one.py"], "contract": ["one.alpha() -> int"]},

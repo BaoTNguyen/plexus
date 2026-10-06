@@ -13,6 +13,8 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import vascular_state
+
 TEMPLATE = '''\
 [goal]
 id = "my-goal"
@@ -23,7 +25,7 @@ context = """Repo layout, constraints, anything the planner needs."""
 suite = "python3 -m pytest -q"   # the executable definition of done
 manual = []                      # claims no suite can make; you confirm these
 # Everything the planner needs beyond this — problem, behaviour, architecture,
-# program design, build order — is Markdown under .plexus/overview/. It lives
+# program design, build order — is Markdown under .vascular/plexus/overview/. It lives
 # there rather than here because architecture is a diagram and program design is
 # a signature, and a TOML list of strings can hold neither.
 
@@ -174,7 +176,7 @@ def install_integration(root: str | Path = ".") -> str:
     green, which is why this has to happen at init rather than be noticed later.
     Best effort: arteries may not be installed, and a goal repo without it works.
     """
-    if (Path(root) / ".arteries").is_dir():
+    if vascular_state.repo_dir(root, "arteries").is_dir():
         return "arteries: already wired"
     try:
         r = subprocess.run(
@@ -195,9 +197,9 @@ def _exclude_plexus_state(root: str | Path) -> None:
     exclude = Path(root) / ".git" / "info" / "exclude"
     if exclude.parent.is_dir():
         existing = exclude.read_text() if exclude.exists() else ""
-        if ".plexus/" not in existing:
+        if ".vascular/" not in existing:
             with open(exclude, "a", encoding="utf-8") as f:
-                f.write("\n.plexus/\nplexus.toml\nruns/\n")
+                f.write("\n.vascular/\nplexus.toml\n")
 
 
 def default_network(root: str | Path = ".") -> str:

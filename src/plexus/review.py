@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import json
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from . import ledger
-from .plan import load_plan, matches as _matches
+from .plan import load_plan, matches as _matches, plan_path
 
 # Paths where a mistake is unrecoverable, from LEDGER.md's system-of-record
 # table: the ledger schema, the spec that keys records to it, and the exports
@@ -47,8 +49,8 @@ PIN_TEST = "tests/test_heart_api_pin.py"
 # diff at land time -- not the plan, which is the agent's own prediction -- and
 # land only with a sign-off. Directory globs for trees, basenames for files
 # that execute wherever they sit.
-EXEC_DIRS = (".claude/**", ".arteries/**", ".codex/**", ".github/**", ".vscode/**",
-             ".devcontainer/**", ".idea/**", ".husky/**")
+EXEC_DIRS = (".claude/**", ".arteries/**", ".vascular/**", ".codex/**", ".github/**",
+             ".vscode/**", ".devcontainer/**", ".idea/**", ".husky/**")
 EXEC_NAMES = ("conftest.py", "setup.py", "setup.cfg", "pyproject.toml",
               "requirements*.txt", "uv.lock", "poetry.lock", "Pipfile*",
               "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
@@ -241,7 +243,12 @@ def _declared(feat: dict) -> set[str]:
 
 def rows(spec, root: str | Path = ".", repo: str | Path | None = None) -> list[dict]:
     repo = repo or root
-    plan = {f["id"]: f for f in load_plan(root)}
+    # every task's plan plus the pre-task one: a repo with tasks has no
+    # plan.jsonl, and load_plan(root) raising SystemExit here killed the run
+    # after goal.finished, before the task was marked landed
+    files = [plan_path(root), *sorted(plan_path(root).parent.glob("plans/*.jsonl"))]
+    plan = {f["id"]: f for p in files if p.exists()
+            for f in (json.loads(l) for l in p.read_text().splitlines() if l.strip())}
     out: list[dict] = []
     for r in ledger.read(root):
         if r["kind"] != "feature.landed" or r.get("goal_id") != spec.goal_id:
@@ -306,3 +313,158 @@ def preview(root: str | Path = ".") -> str:
     heavy = sum(1 for f in plan if classify(f) in ("spine", "boundary"))
     lines.append(f"\n{heavy} of {len(plan)} features will need line-by-line review.")
     return "\n".join(lines)
+
+
+def _cross_repo_diff_paths(repo: str | Path, diff: str) -> list[str]:
+    """Same trick as run.py's `_diff_paths` (not imported: run.py imports this
+    module, and the other direction would be a cycle) -- `git apply --numstat`
+    parses a patch without touching the working tree."""
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "apply", "--numstat", "-"],
+                           input=diff, text=True, capture_output=True, check=True)
+    except (subprocess.CalledProcessError, OSError):
+        return []
+    return [line.split("\t", 2)[2] for line in r.stdout.splitlines() if "\t" in line]
+
+
+def _diff_file_patches(diff: str) -> dict[str, str]:
+    """Split a multi-file diff into per-file patch text, keyed by the `b/` path.
+    Regex on `diff --git a/X b/Y` headers -- crude, but a per-file patch is only
+    needed here to replay one file in isolation, not to understand the diff."""
+    out: dict[str, str] = {}
+    for part in re.split(r"(?m)^(?=diff --git )", diff):
+        m = re.match(r"diff --git a/(?:.+?) b/(.+)", part)
+        if m:
+            out[m.group(1).strip()] = part
+    return out
+
+
+def _public_nodes(tree: ast.Module) -> dict[str, ast.AST]:
+    """Module-level def/class/simple-assignment names with no leading
+    underscore -- the surface a sibling repo could plausibly import."""
+    out: dict[str, ast.AST] = {}
+    for n in tree.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if not n.name.startswith("_"):
+                out[n.name] = n
+        elif isinstance(n, ast.Assign) and len(n.targets) == 1:
+            t = n.targets[0]
+            if isinstance(t, ast.Name) and not t.id.startswith("_"):
+                out[t.id] = n
+    return out
+
+
+def _after_content(path: str, patch: str, before: str) -> str | None:
+    """Replay one file's patch against its base content in a scratch directory
+    -- `git apply` works on plain files outside a repository, so no worktree
+    or commit is needed just to see what the file looks like post-diff."""
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / path
+            if before:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(before)
+            r = subprocess.run(["git", "apply", "--whitespace=nowarn"],
+                               input=patch, text=True, capture_output=True, cwd=tmp)
+            if r.returncode != 0:
+                return None
+            return target.read_text() if target.exists() else ""
+    except OSError:
+        return None
+
+
+def _changed_public_names(repo: str | Path, base: str, path: str, patch: str) -> set[str]:
+    """Public top-level names this file's patch changed or removed. A name that
+    only appears after the patch (a brand-new public def) is not a caller's
+    problem yet -- nothing outside this repo could already depend on it."""
+    before_src = _show(repo, f"{base}:{path}")
+    after_src = _after_content(path, patch, before_src)
+    if after_src is None:
+        return set()
+    try:
+        before_nodes = _public_nodes(ast.parse(before_src)) if before_src else {}
+    except SyntaxError:
+        before_nodes = {}
+    try:
+        after_nodes = _public_nodes(ast.parse(after_src)) if after_src else {}
+    except SyntaxError:
+        after_nodes = {}
+    changed = set()
+    for name, node in before_nodes.items():
+        anode = after_nodes.get(name)
+        if anode is None or ast.get_source_segment(before_src, node) != \
+                ast.get_source_segment(after_src, anode):
+            changed.add(name)
+    return changed
+
+
+def _packages(repo: str | Path) -> tuple[str, list[str]]:
+    """Where importable packages live: `src/*` with an `__init__.py`, or, for a
+    flat layout, top-level dirs with one. Returns the base prefix (`"src"` or
+    `""`) and the package names found there."""
+    repo = Path(repo)
+    src = repo / "src"
+    base_dir = src if src.is_dir() else repo
+    pkgs = sorted(p.name for p in base_dir.iterdir()
+                 if p.is_dir() and (p / "__init__.py").is_file())
+    return ("src" if base_dir is src else ""), pkgs
+
+
+def cross_repo_callers(repo: str | Path, base: str, diff: str) -> list[str]:
+    """Sibling checkouts that mention a public name this diff changed or
+    dropped from a package plexus can see.
+
+    Plexus reviews one repo at a time; a rename or a deleted function here is
+    invisible to whatever imports it from next door until something breaks
+    over there. A regex grep of sibling source is a crude reference check on
+    purpose -- a real cross-repo type-checker is more project than this gate
+    needs; the point is a human notices before the sibling does. Never raises:
+    a file this can't parse or a sibling git can't list is skipped, not fatal.
+    """
+    try:
+        repo_path = Path(repo).resolve()
+        pkg_base, pkgs = _packages(repo_path)
+        if not pkgs:
+            return []
+        patches = _diff_file_patches(diff)
+        touched = set(_cross_repo_diff_paths(repo_path, diff)) & set(patches)
+        prefix = f"{pkg_base}/" if pkg_base else ""
+        changed: set[str] = set()
+        for path in touched:
+            if not path.endswith(".py") or not path.startswith(prefix):
+                continue
+            rel = path[len(prefix):]
+            if rel.split("/", 1)[0] not in pkgs:
+                continue
+            try:
+                names = _changed_public_names(repo_path, base, path, patches[path])
+            except Exception:
+                continue
+            dotted = rel[:-len(".py")].replace("/", ".")
+            changed |= {f"{dotted}.{n}" for n in names}
+        if not changed:
+            return []
+        refs: set[str] = set()
+        for sib in repo_path.parent.iterdir():
+            if not sib.is_dir() or sib == repo_path or not (sib / ".git").exists():
+                continue
+            r = subprocess.run(["git", "-C", str(sib), "ls-files", "*.py"],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                continue
+            for f in r.stdout.split():
+                try:
+                    text = (sib / f).read_text()
+                except OSError:
+                    continue
+                for i, line in enumerate(text.splitlines(), 1):
+                    for qualname in changed:
+                        module, _, name = qualname.rpartition(".")
+                        word = rf"\b{re.escape(name)}\b"
+                        if (module and module in line and re.search(word, line)) or \
+                           re.search(rf"from\s+{re.escape(module)}\s+import\s+.*{word}", line):
+                            refs.add(f"{sib.name}/{f}:{i}")
+                            break
+        return sorted(refs)
+    except Exception:
+        return []

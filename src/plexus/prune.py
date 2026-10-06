@@ -1,4 +1,4 @@
-"""Retention for `runs/` — the episode dumps heart writes per attempt.
+"""Retention for `.vascular/plexus/runs/` — the episode dumps heart writes per attempt.
 
 Not a cleanup script, because the dumps are not scratch. Two things hold
 references to them: `plexus why` prints `pulse episode <id>` instead of copying
@@ -24,13 +24,13 @@ import json
 import shutil
 from pathlib import Path
 
-from . import ledger
+from . import ledger, vascular_state
 
 
 def _exported_ids(root: str | Path) -> set[str]:
     """Episode ids already captured in labels.jsonl — their reward is safe to
     delete because marrow has it. Missing file = nothing exported yet."""
-    p = Path(root) / ".plexus" / "labels.jsonl"
+    p = vascular_state.labels_path(root)
     if not p.exists():
         return set()
     out: set[str] = set()
@@ -68,9 +68,11 @@ def _referenced(recs: list[dict]) -> set[str]:
 
 
 def plan_prune(root: str | Path = ".", days: float = 14,
-               runs_dir: str = "runs") -> tuple[list[Path], list[Path], int]:
+               runs_dir: str | Path | None = None) -> tuple[list[Path], list[Path], int]:
     """(prunable, kept, bytes_freed). Pure — deletes nothing."""
     root = Path(root)
+    if runs_dir is None:
+        runs_dir = vascular_state.runs_dir(root)
     base = root / runs_dir
     if not base.is_dir():
         return [], [], 0
@@ -91,7 +93,7 @@ def plan_prune(root: str | Path = ".", days: float = 14,
 
 
 def prune(root: str | Path = ".", days: float = 14, apply: bool = False,
-          runs_dir: str = "runs", force: bool = False) -> list[str]:
+          runs_dir: str | Path | None = None, force: bool = False) -> list[str]:
     prunable, kept, freed = plan_prune(root, days, runs_dir)
     mb = freed / 1_000_000
     if not prunable:
@@ -108,7 +110,7 @@ def prune(root: str | Path = ".", days: float = 14, apply: bool = False,
         unexported = [d for d in prunable if d.name not in exported]
         if unexported and not force:
             return [f"refusing to prune: {len(unexported)} of {len(prunable)} episode(s) "
-                    f"are not in .plexus/labels.jsonl — their reward is training data "
+                    f"are not in .vascular/plexus/labels.jsonl — their reward is training data "
                     f"that deletion would lose.",
                     "run `plexus export` first, or `plexus prune --apply --force` to "
                     "delete anyway."]

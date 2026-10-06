@@ -13,7 +13,7 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-from . import events
+from . import events, vascular_state
 
 # escalations pause the run; without this you only find out by polling `status`
 _NOTIFY_ON = {"escalation.raised"}
@@ -41,7 +41,7 @@ def _notify(root: str | Path, rec: dict) -> None:
 
 
 def ledger_path(root: str | Path = ".") -> Path:
-    return Path(root) / ".plexus" / "ledger.jsonl"
+    return vascular_state.ledger_path(root)
 
 
 def record(

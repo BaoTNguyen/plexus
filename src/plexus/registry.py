@@ -8,7 +8,7 @@ queued instead of silently blocking a sibling project.
 
 The map is fleet-level config, the one place that knows which local checkout
 owns which top-level package. Default location
-`$XDG_CONFIG_HOME/plexus/registry.json` (override with `PLEXUS_REGISTRY`):
+`~/.vascular/config/plexus/registry.json` (override with `PLEXUS_REGISTRY`):
 
     {"heart": "/home/me/Coding/Projects/heart",
      "arteries": "/home/me/Coding/Projects/arteries"}
@@ -31,7 +31,8 @@ from .spec import scaffold_goal
 
 
 def _config_dir() -> Path:
-    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "plexus"
+    from . import vascular_paths
+    return vascular_paths.path("config", "plexus")
 
 
 def _registry_path() -> Path:
@@ -204,10 +205,12 @@ _DEV_DIRS = ("~/.claude/skills", "~/.claude/plugins")
 
 def seat_secrets() -> Path:
     """Where seat tokens for the egress proxy's injector live: one file per
-    route (`anthropic`), mode 0600, mounted read-only into the proxy and
-    nowhere else. Beside heart's models.json because heart's proxy reads it."""
-    cfg = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return cfg / "heart" / "secrets"
+    route (`anthropic`), mode 0600, plus the sentinel seed and `tls/`.
+    Mounted read-only into the proxy and nowhere else. heart computes the
+    same directory, because heart's proxy reads the sentinel seed plexus
+    writes: <VASCULAR_HOME or ~/.vascular>/secrets/heart."""
+    from . import vascular_paths
+    return vascular_paths.path("secrets", "heart")
 
 
 def sentinel_seed() -> Path:
@@ -222,7 +225,11 @@ def sentinel_seed() -> Path:
     """
     path = seat_secrets() / "sentinel"
     if not path.is_file():
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # mkdir's mode only reaches the leaf, and umask masks it: set each level
+        for d in (path.parent.parent, path.parent):
+            if not d.is_dir():
+                d.mkdir(parents=True, mode=0o700)
+                d.chmod(0o700)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(secrets.token_urlsafe(32))
@@ -299,9 +306,21 @@ def seat_env() -> dict[str, str]:
              if dev and Path(f).expanduser().is_file()]
     if "chatgpt" in injected:
         # the plan is the one true fact the stand-in auth.json carries
-        plan = (codex_claims().get("https://api.openai.com/auth") or {}).get("chatgpt_plan_type")
-        if plan:
+        auth = codex_claims().get("https://api.openai.com/auth") or {}
+        if plan := auth.get("chatgpt_plan_type"):
             env["HEART_SANDBOX_CODEX_PLAN"] = str(plan)
+        # Codex 0.157 checks the account its token names against the workspaces
+        # the (injected, real) token can route to, and refuses a stand-in that
+        # names "heart-sentinel". An account id is an identifier, not a
+        # credential: the proxy already sends it upstream on every request.
+        if account := auth.get("chatgpt_account_id"):
+            env["HEART_SANDBOX_CODEX_ACCOUNT"] = str(account)
+        ca = seat_secrets() / "tls" / "ca.pem"
+        if ca.is_file():
+            env["HEART_SANDBOX_INJECT_TLS_PORT"] = os.environ.get(
+                "HEART_SANDBOX_INJECT_TLS_PORT", "8890"
+            )
+            env["HEART_SANDBOX_CA_CERT"] = str(ca)
     for provider, group in _SEAT_FILES.items() if seats else ():
         if (provider, True) in (("claude", "anthropic" in injected),
                                 ("codex", "chatgpt" in injected)):

@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("export", help="labels.jsonl for marrow: acceptance joined to heart reward")
     s.add_argument("--root", default=".")
-    s.add_argument("-o", "--out", default=None, help="default .plexus/labels.jsonl")
+    s.add_argument("-o", "--out", default=None, help="default .vascular/plexus/labels.jsonl")
 
     s = sub.add_parser("prune", help="drop old episode dumps that nothing references")
     s.add_argument("--root", default=".")
@@ -134,6 +134,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="cap on ALL agents across goals, stamped into each run")
 
     args = p.parse_args(argv)
+    # heart builds the sandbox's .git mount from this path, and Docker refuses a
+    # relative mount, so the default "." must not reach it as ".".
+    if getattr(args, "root", None):
+        args.root = os.path.abspath(args.root)
     # Credentials are fleet policy, so they are decided once, here, rather than
     # in whichever shell happened to launch a run. Every subcommand and every
     # child inherits the same answer -- `plexus serve` spawns `python -m
@@ -173,15 +177,19 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "run":
         from .run import run
-        from .sandbox import ensure
+        from .sandbox import SandboxNotReady, ensure
         from .spec import load_spec
         # Before the wave, not per episode. Every goal in this run assumes the
         # same network, the same proxy and the same image; discovering that any
         # of them is missing costs one failed episode per goal otherwise, each
         # taking its full timeout to say so.
         if os.environ.get("HEART_SANDBOX", "off") not in ("off", ""):
-            for line in ensure():
-                print(f"sandbox: {line}")
+            try:
+                for line in ensure():
+                    print(f"sandbox: {line}")
+            except SandboxNotReady as exc:
+                print(f"sandbox: {exc}")
+                return 1
         return run(load_spec(args.root), args.root, candidates=args.candidates,
                    task_id=args.task)
     if args.cmd == "amend":
