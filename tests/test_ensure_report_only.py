@@ -43,7 +43,7 @@ def test_ensure_with_no_ca_does_not_provision_tls(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])
     monkeypatch.setattr(sandbox, "_running_config", lambda _p, running_only=True: {
         "ALLOW": "", "DENY": "", "INJECT_PORT": sandbox.INJECT_PORT, "INJECT_TLS_PORT": "",
-        "secrets": True, "codex": True,
+        "secrets": True, "codex": True, "log": True,
     })
     _stub_docker(monkeypatch, sandbox, {})
 
@@ -140,7 +140,7 @@ def test_ensure_attaches_a_running_proxy_after_creating_a_missing_network(monkey
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])
     monkeypatch.setattr(sandbox, "_running_config", lambda _p, running_only=True: {
         "ALLOW": "", "DENY": "", "INJECT_PORT": "", "INJECT_TLS_PORT": "",
-        "secrets": False, "codex": False,
+        "secrets": False, "codex": False, "log": True,
     })
     calls = _stub_docker(monkeypatch, sandbox, {
         ("network", "inspect"): (1, "No such network"),
@@ -170,6 +170,7 @@ def test_doctor_fix_still_provisions_tls_and_restarts(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox, "_running_config", lambda _p, running_only=True: None)
     monkeypatch.setattr(sandbox, "proxy_script", lambda: script)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VASCULAR_HOME", str(tmp_path / "vascular"))
     calls = _stub_docker(monkeypatch, sandbox, {})
 
     sandbox.doctor(fix=True)
