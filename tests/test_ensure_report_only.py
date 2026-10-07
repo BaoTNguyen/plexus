@@ -43,7 +43,7 @@ def test_ensure_with_no_ca_does_not_provision_tls(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])
     monkeypatch.setattr(sandbox, "_running_config", lambda _p, running_only=True: {
         "ALLOW": "", "DENY": "", "INJECT_PORT": sandbox.INJECT_PORT, "INJECT_TLS_PORT": "",
-        "secrets": True, "codex": True,
+        "secrets": str(tmp_path), "codex": True, "log": True,
     })
     _stub_docker(monkeypatch, sandbox, {})
 
@@ -63,7 +63,7 @@ def test_ensure_does_not_restart_a_running_proxy_with_different_settings(monkeyp
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])
     monkeypatch.setattr(sandbox, "_running_config", lambda _p, running_only=True: {
         "ALLOW": "", "DENY": "", "INJECT_PORT": "", "INJECT_TLS_PORT": "9999",
-        "secrets": False, "codex": False,
+        "secrets": "", "codex": False,
     })
     calls = _stub_docker(monkeypatch, sandbox, {})
 
@@ -82,7 +82,7 @@ def test_ensure_restarts_a_stopped_proxy_with_its_running_equivalent_settings(mo
     monkeypatch.setattr("plexus.registry.injected_seats", lambda: set())
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])
     stopped = {"ALLOW": "", "DENY": "", "INJECT_PORT": "", "INJECT_TLS_PORT": "",
-               "secrets": False, "codex": False}
+               "secrets": "", "codex": False}
     monkeypatch.setattr(sandbox, "_running_config",
                         lambda _p, running_only=True: None if running_only else stopped)
     calls = _stub_docker(monkeypatch, sandbox, {("start", sandbox.PROXY): (0, "")})
@@ -140,7 +140,7 @@ def test_ensure_attaches_a_running_proxy_after_creating_a_missing_network(monkey
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])
     monkeypatch.setattr(sandbox, "_running_config", lambda _p, running_only=True: {
         "ALLOW": "", "DENY": "", "INJECT_PORT": "", "INJECT_TLS_PORT": "",
-        "secrets": False, "codex": False,
+        "secrets": "", "codex": False, "log": True,
     })
     calls = _stub_docker(monkeypatch, sandbox, {
         ("network", "inspect"): (1, "No such network"),
@@ -170,6 +170,7 @@ def test_doctor_fix_still_provisions_tls_and_restarts(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox, "_running_config", lambda _p, running_only=True: None)
     monkeypatch.setattr(sandbox, "proxy_script", lambda: script)
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("VASCULAR_HOME", str(tmp_path / "vascular"))
     calls = _stub_docker(monkeypatch, sandbox, {})
 
     sandbox.doctor(fix=True)
@@ -187,7 +188,7 @@ def test_ensure_refuses_to_start_a_stopped_proxy_whose_secrets_are_gone(monkeypa
     monkeypatch.setattr("plexus.registry.seat_secrets", lambda: tmp_path)  # no sentinel
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])
     stopped = {"ALLOW": "", "DENY": "", "INJECT_PORT": sandbox.INJECT_PORT,
-               "INJECT_TLS_PORT": "", "secrets": True, "codex": False}
+               "INJECT_TLS_PORT": "", "secrets": str(tmp_path), "codex": False}
     monkeypatch.setattr(sandbox, "_running_config",
                         lambda _p, running_only=True: None if running_only else stopped)
     calls = _stub_docker(monkeypatch, sandbox, {})
