@@ -56,7 +56,7 @@ def test_run_reports_a_skipped_credential_change(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])
     monkeypatch.setattr(sandbox, "_running_config", lambda _p, running_only=True: {
         "ALLOW": "", "DENY": "", "INJECT_PORT": "", "INJECT_TLS_PORT": "",
-        "secrets": False, "codex": False,
+        "secrets": "", "codex": False, "log": True,
     })
     _stub_docker(monkeypatch, {})
 
@@ -77,7 +77,7 @@ def test_run_reports_a_skipped_proxy_setting_change(monkeypatch, tmp_path, capsy
                         lambda: [(sandbox.NETWORK, sandbox.PROXY, "wanted.example:443", "")])
     monkeypatch.setattr(sandbox, "_running_config", lambda _p, running_only=True: {
         "ALLOW": "stale.example:443", "DENY": "", "INJECT_PORT": "", "INJECT_TLS_PORT": "",
-        "secrets": False, "codex": False,
+        "secrets": "", "codex": False,
     })
     calls = _stub_docker(monkeypatch, {})
 
@@ -102,7 +102,7 @@ def test_run_reports_a_skipped_tls_change(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])
     monkeypatch.setattr(sandbox, "_running_config", lambda _p, running_only=True: {
         "ALLOW": "", "DENY": "", "INJECT_PORT": sandbox.INJECT_PORT, "INJECT_TLS_PORT": "",
-        "secrets": True, "codex": True,
+        "secrets": str(tmp_path / "secrets"), "codex": True, "log": True,
     })
     calls = _stub_docker(monkeypatch, {})
 
