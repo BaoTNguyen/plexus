@@ -9,6 +9,9 @@ from pathlib import Path
 
 tmp = Path(tempfile.mkdtemp(prefix="plexus-test-"))
 os.environ["EVENT_JOURNAL_DIR"] = str(tmp / "journal")
+# heart's emitter keeps per-context markers under $VASCULAR_HOME; keep them
+# out of the real home, so every run starts from a fresh context
+os.environ["VASCULAR_HOME"] = str(tmp / "vascular")
 
 here = Path(__file__).resolve()
 for p in (here.parents[1] / "src", here.parents[2] / "heart" / "src"):
@@ -32,6 +35,8 @@ assert [r["kind"] for r in recs] == [
 journal_files = list((tmp / "journal").glob("*.ndjson"))
 assert journal_files, "spine events not written"
 journal = [json.loads(l) for l in journal_files[0].read_text().splitlines()]
+# a fresh emitter context opens with context.started (pulse's envelope)
+journal = [e for e in journal if e["kind"] != "context.started"]
 assert all(e["source"] == "plexus" for e in journal)
 assert journal[1]["payload"]["goal_id"] == "g1"
 assert journal[1]["payload"]["feature_id"] == "f1"
