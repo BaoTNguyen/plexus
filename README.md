@@ -236,6 +236,13 @@ Three kinds, each reduced to an executable check before the run phase starts:
   check or explicitly waives them. Contradictory ground truth is surfaced at
   plan time, never resolved by silent guessing.
 
+A repo other repos import can name them: `[ground_truth] dependents =
+["plexus", "marrow"]` (registry package names). Each one's own `suite` then runs
+in every episode's verifier against the candidate, with the candidate first on
+`PYTHONPATH` and the dependent's checkout mounted read-only at `/deps/<name>`.
+A change that breaks a caller fails its episode instead of landing green, and a
+dependent plexus can't find stops the run rather than being skipped.
+
 ## Stopping and escalation
 
 - **Done** means: every feature's acceptance check and the full ground-truth

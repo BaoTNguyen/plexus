@@ -21,22 +21,24 @@ import fcntl
 import importlib
 import os
 import re
+import shlex
 import subprocess
+import tomllib
 from pathlib import Path
 
 from heart.detect import detect_verifiers
 from heart.env import Workspace
 from heart.episode import DEFAULT_ROLES, best_episode, run_candidates
 from heart.orchestrate import run_orchestrated
-from heart.runner import run_contained
-from heart.taskspec import TaskSpec
+from heart.runner import SANDBOX_MODE, run_contained
+from heart.taskspec import TaskSpec, Verifier
 
 from . import events, ledger, scope
 from . import tasks as _tasks
 from . import vascular_state
 from .plan import matches as _matches
 from .plan import execution_order, load_plan, parse_expect
-from .registry import seed_upstream
+from .registry import load_registry, seed_upstream
 from .review import classify, cross_repo_callers, exec_surface, report, suspicious
 
 # heart episode outcomes that are mechanical failures — no valid applied diff to
@@ -670,6 +672,42 @@ def _feature_prompt(spec, feat: dict, retry_context: dict) -> str:
     return "\n\n".join(parts)
 
 
+def _dependent_verifiers(spec, repo: str) -> tuple[list[Verifier], dict[str, str]]:
+    """Verifiers that run each dependent's own suite against the candidate, and
+    the read-only mounts that bring the dependents' checkouts into the verifier.
+
+    heart's verifier only sees the repo under test, so a heart change that broke
+    plexus's or marrow's tests landed green and was found by hand (F85). The
+    candidate goes first on PYTHONPATH, ahead of whatever copy is installed or
+    baked into the image. A dependent that can't be found stops the run: a
+    check that silently didn't run is the failure this exists to remove."""
+    if not spec.dependents:
+        return [], {}
+    reg = load_registry()
+    sandboxed = os.environ.get("HEART_SANDBOX") == SANDBOX_MODE
+    code_root = "src" if (Path(repo) / "src").is_dir() else "."
+    verifiers, mounts = [], {}
+    for name in spec.dependents:
+        path = reg.get(name)
+        if not path or not Path(path).is_dir():
+            raise SystemExit(f"dependent {name!r} (plexus.toml [ground_truth] "
+                             f"dependents) is not a registered checkout; add its "
+                             f"workspace root, or remove it from the list")
+        try:
+            gt = tomllib.loads((Path(path) / "plexus.toml").read_text())["ground_truth"]
+            suite = gt["suite"]
+        except (OSError, KeyError, tomllib.TOMLDecodeError):
+            suite = "python3 -m pytest -q"
+        where = f"/deps/{name}" if sandboxed else path
+        if sandboxed:
+            mounts[path] = where
+        verifiers.append(Verifier(
+            name=f"dependent:{name}",
+            command=(f'W="$PWD" && cd {shlex.quote(where)} && '
+                     f'PYTHONPATH="$W/{code_root}${{PYTHONPATH:+:$PYTHONPATH}}" {suite}')))
+    return verifiers, mounts
+
+
 def _probe_regression_signal(repo: str, base: str, timeout: int, goal_id: str) -> None:
     """Run the repo's own auto-detected suite twice at HEAD before the loop. The
     regression axis of plexus's coding-vs-intent split *is* heart's pass/fail on
@@ -790,6 +828,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
         ledger.record("goal.started", goal_id=spec.goal_id, root=root,
                       repo=repo, base_commit=_head(repo), spec_hash=spec.spec_hash)
     _probe_regression_signal(repo, _head(repo), spec.timeout, spec.goal_id)
+    dep_verifiers, dep_mounts = _dependent_verifiers(spec, repo)
 
     for feat in execution_order(plan):
         fid = feat["id"]
@@ -859,7 +898,9 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
             task = TaskSpec(
                 task_id=task_id, repo_path=repo, base_commit=base,
                 prompt=_feature_prompt(spec, feat, retry_context),
-                public_verifiers=detect_verifiers(repo),  # heart: regression/correctness
+                # heart: regression/correctness, here and in every dependent
+                public_verifiers=detect_verifiers(repo) + dep_verifiers,
+                verifier_mounts=dep_mounts,
                 timeout_seconds=spec.timeout,
                 skills=feat.get("skills", []),
                 difficulty=feat.get("difficulty", "unknown"),

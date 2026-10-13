@@ -24,6 +24,7 @@ context = """Repo layout, constraints, anything the planner needs."""
 [ground_truth]
 suite = "python3 -m pytest -q"   # the executable definition of done
 manual = []                      # claims no suite can make; you confirm these
+# dependents = []                # packages that import this repo; their suites must pass too
 # Everything the planner needs beyond this — problem, behaviour, architecture,
 # program design, build order — is Markdown under .vascular/plexus/overview/. It lives
 # there rather than here because architecture is a diagram and program design is
@@ -110,6 +111,10 @@ class GoalSpec:
     # make, which gate delivery until you confirm them. Structured because
     # run.py records them and validation checks them off one by one.
     manual_checks: tuple[str, ...] = field(default_factory=tuple)
+    # Packages (registry names) that import this repo. Their own suites run in
+    # every episode's verifier against the candidate, so a change that breaks a
+    # caller fails before it lands rather than after (F85).
+    dependents: tuple[str, ...] = ()
 
 
 def _agent_string(agent: dict) -> str:
@@ -162,6 +167,7 @@ def load_spec(root: str | Path = ".") -> GoalSpec:
         pr_base=review.get("pr_base", "main"),
         # `[scope].manual_checks` is where these lived before the overview split
         # the prose out; read it so an existing repo keeps its checks.
+        dependents=tuple(gt.get("dependents", ())),
         manual_checks=tuple(gt.get("manual")
                             or data.get("scope", {}).get("manual_checks", ())),
     )
