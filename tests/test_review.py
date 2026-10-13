@@ -20,8 +20,10 @@ os.environ["EVENT_JOURNAL_DIR"] = str(tmp / "journal")
 os.environ["VASCULAR_HOME"] = str(tmp / "vascular")
 
 here = Path(__file__).resolve()
-for p in (here.parents[1] / "src", here.parents[2] / "heart" / "src"):
-    sys.path.insert(0, str(p))
+sys.path.insert(0, str(here.parents[1] / "src"))
+# heart beside this checkout, but behind any heart already on the path: a
+# dependent verifier puts the candidate heart first on PYTHONPATH (F85)
+sys.path.append(str(here.parents[2] / "heart" / "src"))
 from plexus import ledger, review  # noqa: E402
 from plexus import vascular_state
 from plexus.plan import matches  # noqa: E402
