@@ -16,6 +16,8 @@ from pathlib import Path
 
 tmp = Path(tempfile.mkdtemp(prefix="plexus-review-test-"))
 os.environ["EVENT_JOURNAL_DIR"] = str(tmp / "journal")
+# heart's emitter keeps per-context markers under $VASCULAR_HOME
+os.environ["VASCULAR_HOME"] = str(tmp / "vascular")
 
 here = Path(__file__).resolve()
 for p in (here.parents[1] / "src", here.parents[2] / "heart" / "src"):
