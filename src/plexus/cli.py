@@ -147,6 +147,21 @@ def main(argv: list[str] | None = None) -> int:
     # `--help` answerable — on a box where heart is not installed yet.
     from .registry import seat_env
     os.environ.update(seat_env())
+    # plan, approve and run execute agents or agent-written criteria. Unset
+    # HEART_SANDBOX silently meant "on this host": four web-lane episodes ran
+    # there unnoticed (F71), and approve judged criteria in the wrong place
+    # (F79). Saying `off` out loud is still a supported choice.
+    if args.cmd in ("plan", "approve", "run"):
+        mode = os.environ.get("HEART_SANDBOX")
+        if mode is None:
+            print("HEART_SANDBOX is unset, so agents and their checks would run on "
+                  "this host unsandboxed. Set HEART_SANDBOX=docker-sbx (with "
+                  "HEART_SANDBOX_IMAGE) to sandbox them, or HEART_SANDBOX=off to "
+                  "run here on purpose.", file=sys.stderr)
+            return 1
+        if mode in ("off", ""):
+            print("WARNING: HEART_SANDBOX=off -- agents and their checks run on "
+                  "this host, unsandboxed", file=sys.stderr)
     if args.cmd == "init":
         from .spec import init, install_integration
         path = init(args.root)

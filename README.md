@@ -195,6 +195,12 @@ one-way: plexus imports heart; heart never knows plexus exists.
 
 ## The loop
 
+`plan`, `approve` and `run` execute agents or agent-written checks, so they
+refuse to start until you choose where: `HEART_SANDBOX=docker-sbx` (with
+`HEART_SANDBOX_IMAGE`) runs them in containers, and `HEART_SANDBOX=off` runs them
+on this host on purpose, with a warning. Under the sandbox, `run` also refuses an
+image whose baked heart differs from your heart checkout; rebuild it first.
+
 1. **Shape.** `plexus init` scaffolds `plexus.toml`. Goals in prose, ground
    truth declared explicitly (see below), budgets defaulted.
 2. **Plan.** `plexus plan` runs one solo heart episode that turns goal +

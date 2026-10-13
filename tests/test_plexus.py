@@ -960,6 +960,7 @@ def test_a_routable_egress_network_is_reported_not_tolerated(monkeypatch):
     monkeypatch.setattr(sandbox, "_docker",
                         lambda *a, **k: (0, "false") if a[:2] == ("network", "inspect") else (0, ""))
     monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None)
+    monkeypatch.setattr("plexus.sandbox._baked_heart_drift", lambda: None)
 
     out = "\n".join(sandbox.doctor())
     assert "NOT --internal" in out
@@ -993,6 +994,7 @@ def test_fix_creates_the_network_and_starts_the_proxy(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox, "proxy_script", lambda: script)
     monkeypatch.setattr(sandbox, "reap", lambda: (0, 0))
     monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None)
+    monkeypatch.setattr("plexus.sandbox._baked_heart_drift", lambda: None)
 
     sandbox.doctor(fix=True)
     assert ("network", "create", "--internal", sandbox.NETWORK) in calls
@@ -1148,6 +1150,7 @@ def test_fix_provisions_a_web_lane_with_its_own_proxy_and_filter(monkeypatch, tm
     monkeypatch.setattr(sandbox, "reap", lambda: (0, 0))
     monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {"claude": 100.0})
     monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None)
+    monkeypatch.setattr("plexus.sandbox._baked_heart_drift", lambda: None)
 
     sandbox.doctor(fix=True)
     assert ("network", "create", "--internal", sandbox.WEB_NETWORK) in calls
