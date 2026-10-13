@@ -17,6 +17,7 @@ def _isolate_and_stub(monkeypatch, tmp_path):
     monkeypatch.setenv("PLEXUS_DEV_ENV", "off")
     monkeypatch.setenv("HEART_SANDBOX", "1")
     monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None, raising=False)
+    monkeypatch.setattr("plexus.sandbox._baked_heart_drift", lambda: None)
     monkeypatch.setattr(sandbox, "local_model_hosts", lambda: [])
     monkeypatch.setattr(sandbox, "reap", lambda: (0, 0))
     # the real run loop is not what this file tests; a run invoked past
@@ -139,3 +140,36 @@ def test_run_skips_ensure_when_sandbox_is_off(monkeypatch, tmp_path, capsys):
 
     assert rc == 0
     assert _sandbox_lines(capsys) == []
+
+
+def test_run_refuses_an_image_whose_baked_heart_drifted(monkeypatch, tmp_path, capsys):
+    """F38: verifiers import the image's heart, so a stale one judges every
+    episode by old code. That is certain to mislead, so it stops the run."""
+    monkeypatch.setattr(registry, "injected_seats", lambda: set())
+    monkeypatch.setattr(registry, "detect_subscriptions", lambda: {})
+    monkeypatch.setattr(sandbox, "lanes", lambda: [])
+    monkeypatch.setattr(sandbox, "_baked_heart_drift",
+                        lambda: "sandbox image 'x' bakes heart abc, ...; rebuild it")
+    _stub_docker(monkeypatch, {})
+
+    rc = cli.main(["run", "--root", str(tmp_path)])
+
+    assert rc == 1
+    assert any("bakes heart abc" in l for l in _sandbox_lines(capsys))
+
+
+@pytest.mark.parametrize("cmd", ["plan", "approve", "run"])
+def test_an_unset_sandbox_refuses_instead_of_running_on_the_host(
+        monkeypatch, tmp_path, capsys, cmd):
+    """F71/F79: unset used to mean "on this host" without a word."""
+    monkeypatch.delenv("HEART_SANDBOX")
+
+    assert cli.main([cmd, "--root", str(tmp_path)]) == 1
+    assert "HEART_SANDBOX is unset" in capsys.readouterr().err
+
+
+def test_sandbox_off_on_purpose_still_runs_but_says_so(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("HEART_SANDBOX", "off")
+
+    assert cli.main(["run", "--root", str(tmp_path)]) == 0
+    assert "WARNING: HEART_SANDBOX=off" in capsys.readouterr().err
