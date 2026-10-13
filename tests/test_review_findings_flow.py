@@ -92,7 +92,7 @@ def _fake_build_sequence(cands: list[tuple]):
         d = runs_dir / ep_id
         d.mkdir(parents=True, exist_ok=True)
         (d / "diff.patch").write_text(diff_text)
-        ep = {"episode_id": ep_id, "outcome": outcome, "reward": {"total": 1.0}}
+        ep = {"episode_id": ep_id, "outcome": outcome}
         if review is not None:
             ep["review_verdict"] = review
         if findings is not None:

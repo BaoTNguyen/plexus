@@ -566,7 +566,7 @@ def _short(v, n: int = 70) -> str:
 def _event_detail(kind: str, payload: dict) -> str:
     """The salient bit of a spine event for the live log — the fields you'd want
     to see scroll by while an agent works, else a compact head of the payload."""
-    salient = [k for k in ("role", "tool", "command", "outcome", "reward", "passed",
+    salient = [k for k in ("role", "tool", "command", "outcome", "passed",
                            "verifier", "reason_class", "reason", "message", "status",
                            "outcome", "cost_usd", "attempt", "chosen", "mode")
                if k in payload]
@@ -578,7 +578,7 @@ def _live(root: Path, limit: int = 60) -> list[dict]:
     """The goal's live activity: spine events across the whole stack, filtered to
     this goal's lineage (plexus stamps task_id `<goal>-<feature>-a<n>`, and heart
     stamps payload.goal_id), newest last so it reads like a tail. This is the
-    'watch it work' surface — role turns, verifier rounds, rewards, retrieval —
+    'watch it work' surface — role turns, verifier rounds, retrieval —
     that the ledger (coarse, durable) deliberately doesn't carry.
     ponytail: full-journal scan per poll; prune by day-file if it ever drags."""
     goal_id = _goal_id(root)

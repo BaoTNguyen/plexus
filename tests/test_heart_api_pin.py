@@ -136,9 +136,8 @@ class TestHeartApiPin(unittest.TestCase):
                 timeout_seconds=120)
             ep = run_orchestrated(task, agent="shell", runs_dir=str(root / "runs"),
                                   manifest={})
-        for key in ("episode_id", "outcome", "review_verdict", "reward", "usage"):
+        for key in ("episode_id", "outcome", "review_verdict", "diff_lines", "usage"):
             self.assertIn(key, ep, f"Path B result is missing {key!r}")
-        self.assertIn("total", ep["reward"])
         self.assertIsInstance(ep["usage"], dict)
         # best_episode must be able to rank a Path-B result alongside Path A
         self.assertIs(best_episode([ep]), ep)

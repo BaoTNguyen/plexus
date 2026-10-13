@@ -1,18 +1,18 @@
 """Export the ledger as training rows, joined to heart's episode records.
 
-This is the bridge marrow needs. LEDGER law 5 keeps heart's verifier reward and
+This is the bridge marrow needs. LEDGER law 5 keeps heart's verifier outcome and
 plexus's acceptance label in separate fields forever, which is right — but it
 means the interesting cell of the 2x2 (heart green, acceptance red: the agent
 built the wrong thing correctly) exists only as a *join*, and nothing performs
 that join. Anything reading heart alone sees a clean pass.
 
-One row per episode, because the episode is what marrow trains on. Reward comes
-from `.vascular/plexus/runs/<episode_id>/episode.json` rather than the ledger — the ledger
+One row per episode, because the episode is what marrow trains on. Heart's facts
+come from `.vascular/plexus/runs/<episode_id>/episode.json` rather than the ledger — the ledger
 records ids and points at heart for the rest (law 3, reference don't copy), so
 export is where the two are finally brought together. That also fixes the order
-of operations: export before `plexus prune`, or the rewards are already gone.
+of operations: export before `plexus prune`, or heart's facts are already gone.
 
-Blocked episodes are exported too, with a null reward and `label="blocked"`.
+Blocked episodes are exported too, with `label="blocked"`.
 They are not noise to be dropped: whether an abstention was warranted is the
 training signal for asking-instead-of-guessing, and the answer text is right
 there in the resolution.
@@ -27,9 +27,9 @@ from .diagnose import _ESC_PHASE, classify_phase
 
 
 def _episode_facts(root: Path, runs_dir: str, episode_id: str) -> dict:
-    """outcome/reward/diff size from heart's own record of the episode. Missing
-    is normal (pruned, or a run from another machine) — the ledger row still
-    stands on its own, it just carries no reward."""
+    """outcome/diff size from heart's own record of the episode. Missing is
+    normal (pruned, or a run from another machine) — the ledger row still
+    stands on its own, it just carries no heart facts."""
     path = Path(root) / runs_dir / episode_id / "episode.json"
     if not path.exists():
         return {}
@@ -39,7 +39,6 @@ def _episode_facts(root: Path, runs_dir: str, episode_id: str) -> dict:
         return {}
     return {
         "episode_outcome": ep.get("outcome"),
-        "heart_reward": (ep.get("reward") or {}).get("total"),
         "diff_lines": ep.get("diff_lines"),
         "agent": ep.get("agent"),
         "blocked_reason": ep.get("blocked_reason"),

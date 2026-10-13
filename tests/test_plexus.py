@@ -326,12 +326,12 @@ xr = tmp / "exportrepo"
 vascular_state.runs_dir(xr).mkdir(parents=True, exist_ok=True)
 
 
-def _episode(ep_id: str, outcome: str, reward, task_id: str) -> None:
+def _episode(ep_id: str, outcome: str, task_id: str) -> None:
     d = vascular_state.runs_dir(xr) / ep_id
     d.mkdir(parents=True, exist_ok=True)
     (d / "episode.json").write_text(json.dumps({
         "episode_id": ep_id, "task_id": task_id, "outcome": outcome,
-        "reward": {"total": reward, "components": {}}, "diff_lines": 12,
+        "diff_lines": 12,
         "agent": "claude"}))
 
 
@@ -341,7 +341,7 @@ ledger.record("plan.created", goal_id="xg", root=xr, plan_id="p1", features=[
     {"feature_id": "f2", "title": "two", "acceptance": "pytest tests/f2.py"}])
 
 # f1 attempt 1: heart green, criterion unmet — the hard negative marrow needs
-_episode("ep-a", "pass", 0.97, "xg-f1-a1")
+_episode("ep-a", "pass", "xg-f1-a1")
 ledger.record("acceptance.round", goal_id="xg", feature_id="f1", root=xr,
               attempt=1, task_id="xg-f1-a1", episode_id="ep-a", passed=False,
               episode_outcome="pass", check="pytest tests/f1.py")
@@ -349,14 +349,14 @@ ledger.record("feature.failed", goal_id="xg", feature_id="f1", root=xr, attempt=
               task_id="xg-f1-a1", episode_id="ep-a", failure_class="acceptance_failed",
               episode_outcome="pass", acceptance_passed=False, reason="x")
 # f1 attempt 2 lands
-_episode("ep-b", "pass", 0.99, "xg-f1-a2")
+_episode("ep-b", "pass", "xg-f1-a2")
 ledger.record("acceptance.round", goal_id="xg", feature_id="f1", root=xr, attempt=2,
               task_id="xg-f1-a2", episode_id="ep-b", passed=True,
               episode_outcome="pass", check="pytest tests/f1.py")
 ledger.record("feature.landed", goal_id="xg", feature_id="f1", root=xr, attempt=2,
               task_id="xg-f1-a2", episode_id="ep-b", commit="deadbeef")
 # f2 blocked, still open — no acceptance ever ran, attempt only in the task_id
-_episode("ep-c", "blocked", None, "xg-f2-a1")
+_episode("ep-c", "blocked", "xg-f2-a1")
 ledger.record("escalation.raised", goal_id="xg", feature_id="f2", root=xr,
               reason_class="blocked_on_decision", reason="sync or async?",
               episode_ids=["ep-c"])
@@ -364,11 +364,10 @@ ledger.record("escalation.raised", goal_id="xg", feature_id="f2", root=xr,
 rows = {r["episode_id"]: r for r in build_rows(xr)}
 assert rows["ep-a"]["label"] == "wrong_thing_built", rows["ep-a"]
 assert rows["ep-a"]["phase"] == "intent"          # coherent code, criterion wrong
-assert rows["ep-a"]["heart_reward"] == 0.97       # heart's number survives the join
+assert rows["ep-a"]["episode_outcome"] == "pass"  # heart's verdict survives the join
 assert rows["ep-b"]["label"] == "landed" and rows["ep-b"]["commit"] == "deadbeef"
 assert rows["ep-b"]["phase"] is None              # a landing has no failure phase
 assert rows["ep-c"]["label"] == "blocked"
-assert rows["ep-c"]["heart_reward"] is None       # abstention carries no reward
 assert rows["ep-c"]["attempt"] == 1               # recovered from the task_id
 assert rows["ep-c"]["criterion"] == "pytest tests/f2.py"
 assert all(r["spec_hash"] == "abc123" for r in rows.values())
@@ -379,7 +378,7 @@ assert len(path.read_text().strip().splitlines()) == 3
 
 # --- prune: keeps what `why` and an open escalation still need ---
 # f3 was held and signed off: the next run lands ep-d's diff, so it must survive
-_episode("ep-d", "pass", 0.9, "xg-f3-a1")
+_episode("ep-d", "pass", "xg-f3-a1")
 ledger.record("escalation.raised", goal_id="xg", feature_id="f3", root=xr,
               reason_class="held_for_review", reason="sign off", episode_ids=["ep-d"])
 ledger.record("escalation.resolved", goal_id="xg", feature_id="f3", root=xr,
@@ -397,7 +396,7 @@ prune(xr, days=0, apply=True)
 assert (not (vascular_state.runs_dir(xr) / "ep-b").exists()
         and (vascular_state.runs_dir(xr) / "ep-c").exists())
 
-# prune refuses to delete an episode whose reward was never exported (no
+# prune refuses to delete an episode that was never exported (no
 # labels.jsonl), and --force overrides
 ur = tmp / "unexported-repo"
 (vascular_state.runs_dir(ur) / "ep-x").mkdir(parents=True)
@@ -405,7 +404,7 @@ ur = tmp / "unexported-repo"
 ledger.record("feature.landed", goal_id="g", feature_id="f", root=ur, episode_id="ep-x")
 refused = "\n".join(prune(ur, days=0, apply=True))
 assert "refusing to prune" in refused, refused
-assert (vascular_state.runs_dir(ur) / "ep-x").exists(), "unexported reward must survive without --force"
+assert (vascular_state.runs_dir(ur) / "ep-x").exists(), "an unexported episode must survive without --force"
 prune(ur, days=0, apply=True, force=True)
 assert not (vascular_state.runs_dir(ur) / "ep-x").exists(), "--force deletes anyway"
 

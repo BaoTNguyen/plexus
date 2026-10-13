@@ -16,7 +16,7 @@ any sibling.
 
 ```text
 plexus       goal decomposition + acceptance loop   <- this repo
-heart        orchestration + environment + reward
+heart        orchestration + environment + verify
 arteries     memory + trace substrate
 capillaries  prompt/skill retrieval
 marrow       RL training on heart's episodes
@@ -184,7 +184,7 @@ task = TaskSpec(task_id=f"{goal_id}-{feature_id}-a{attempt}",
                 repo_path=repo, base_commit=head, prompt=feature_spec,
                 public_verifiers=verifiers)
 ep = best_episode(run_candidates(task, n=1))
-ep["outcome"], ep["reward"], ep["review_verdict"]   # full dict, no stdout parsing
+ep["outcome"], ep["diff_lines"], ep["review_verdict"]   # full dict, no stdout parsing
 ```
 
 This is strictly richer than shelling out to `heart work` (which prints a
@@ -516,18 +516,17 @@ Failures attribute to the 40/20/40 phases (`src/plexus/diagnose.py`):
 under-invested, not that the coder is bad.
 
 **How intent gets separated from code.** Heart judges each episode with the
-repo's own suite (`detect_verifiers`) — its reward stays a pure
+repo's own suite (`detect_verifiers`) — its outcome stays a pure
 regression/correctness signal — while `run.py` runs the feature's acceptance
 criterion in its *own* worktree, outside the episode. The two judgments are
 recorded separately (`acceptance.round.passed` + `episode_outcome`) and can
 disagree, which is the whole point of the 2×2 above. Landing requires *both*:
 the criterion passes and nothing regressed — a diff that meets the feature but
 breaks the existing suite is caught as `testing` and never lands. Acceptance is
-deliberately kept out of heart's reward: heart's hidden verifiers dominate its
-reward (weight 0.45), so routing the criterion through them would merge the two
-rewards, which LEDGER law 5 forbids. That separation is also what manufactures
-marrow's hard negative — an episode that earned heart's reward but failed
-acceptance — which cannot exist while the two are one command.
+deliberately kept out of heart's verifiers: routing the criterion through them
+would merge the two judgments, which LEDGER law 5 forbids. That separation is
+also what manufactures marrow's hard negative — an episode that passed heart
+but failed acceptance — which cannot exist while the two are one command.
 
 Heart's alerting assumes someone at the terminal (exit code as the alert
 primitive); plexus's premise is unattended operation, so an escalation that
@@ -545,7 +544,7 @@ off.
 
 The dashboard also carries a **live** tab per goal: while a run works, it
 polls and virtualizes that goal's spine events — role turns, retrieval, verifier rounds,
-reward, land — filtered to the goal's lineage across heart/arteries/capillaries,
+land — filtered to the goal's lineage across heart/arteries/capillaries,
 so supervision isn't blind between ledger writes. It's the structured,
 event-sourced answer to "watch the agent," not a raw terminal (plexus has no PTY
 to show); the ledger stays the coarse, durable record, the stream the live one.
