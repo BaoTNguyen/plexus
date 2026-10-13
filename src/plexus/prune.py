@@ -2,7 +2,7 @@
 
 Not a cleanup script, because the dumps are not scratch. Two things hold
 references to them: `plexus why` prints `pulse episode <id>` instead of copying
-evidence (LEDGER law 3), and `plexus export` reads reward out of episode.json.
+evidence (LEDGER law 3), and `plexus export` reads outcomes out of episode.json.
 Deleting freely would silently break the drill-down for old failures and throw
 away training data that was never exported.
 
@@ -28,8 +28,8 @@ from . import ledger, vascular_state
 
 
 def _exported_ids(root: str | Path) -> set[str]:
-    """Episode ids already captured in labels.jsonl — their reward is safe to
-    delete because marrow has it. Missing file = nothing exported yet."""
+    """Episode ids already captured in labels.jsonl — safe to delete because
+    the export has their facts. Missing file = nothing exported yet."""
     p = vascular_state.labels_path(root)
     if not p.exists():
         return set()
@@ -106,16 +106,16 @@ def prune(root: str | Path = ".", days: float = 14, apply: bool = False,
     lines = [f"{'pruned' if apply else 'prunable'}: {len(prunable)} episode dir(s), "
              f"{mb:.1f} MB   kept: {len(kept)}"]
     if apply:
-        # Refuse before deleting, not after: an episode's reward in episode.json
-        # is marrow's training signal, captured only once `plexus export` writes
-        # it to labels.jsonl. Deleting an un-exported episode discards that data
+        # Refuse before deleting, not after: an episode's facts in episode.json
+        # are marrow's training data, captured only once `plexus export` writes
+        # them to labels.jsonl. Deleting an un-exported episode discards that data
         # for good, so block it unless the operator forces it.
         exported = _exported_ids(root)
         unexported = [d for d in prunable if d.name not in exported]
         if unexported and not force:
             return [f"refusing to prune: {len(unexported)} of {len(prunable)} episode(s) "
-                    f"are not in .vascular/plexus/labels.jsonl — their reward is training data "
-                    f"that deletion would lose.",
+                    f"are not in .vascular/plexus/labels.jsonl — their outcomes are training "
+                    f"data that deletion would lose.",
                     "run `plexus export` first, or `plexus prune --apply --force` to "
                     "delete anyway."]
         for d in prunable:

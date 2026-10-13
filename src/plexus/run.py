@@ -4,15 +4,15 @@ the next feature) or retry within the attempt budget. Budget exhausted ->
 escalate and pause. Re-running resumes from the next open feature.
 
 Two judgments, kept apart on purpose (LEDGER law 5): heart judges with the
-repo's own suite (`detect_verifiers`) — its reward is a pure regression /
+repo's own suite (`detect_verifiers`) — its outcome is a pure regression /
 correctness signal — while plexus runs the feature's acceptance criterion in
 its *own* worktree, entirely outside the episode. The two are recorded in
 separate fields and can now disagree, which is the whole point: the
 (regression, acceptance) 2x2 is what separates "wrong plan" from "wrong code",
 and the "heart passed / acceptance failed" cell is the hard negative marrow
-cannot otherwise see. Acceptance stays out of heart's reward on purpose —
-heart's hidden verifiers dominate its reward (weight 0.45), so routing the
-criterion through them would merge the two rewards, which LEDGER law 5 forbids.
+cannot otherwise see. Acceptance stays out of heart's verifiers on purpose —
+routing the criterion through them would merge the two judgments, which
+LEDGER law 5 forbids.
 Merging them is marrow's job, never plexus's.
 """
 from __future__ import annotations
@@ -49,7 +49,7 @@ _MECHANICAL = {
     "apply_failed": "apply_failed",
     "episode_error": "episode_error",
     "timeout": "timeout",
-    # a secret in the diff — heart zeroes reward and skips verify, same as a path
+    # a secret in the diff — heart fails the episode and skips verify, same as a path
     # violation. Kept as its own class so `plexus why` names it instead of hiding
     # a leaked credential behind a generic episode_error.
     "guardrail_violation": "guardrail_violation",
@@ -407,7 +407,7 @@ def _run_acceptance(repo: str | Path, base_commit: str, diff: str,
                     ) -> tuple[bool, str, str]:
     """Plexus's own judgment, in its own clean worktree: check out the base,
     apply the episode's diff, run the feature criterion. Deliberately outside
-    heart's episode so heart's reward stays a pure regression signal (see module
+    heart's episode so heart's outcome stays a pure regression signal (see module
     docstring). Reuses heart's Workspace — worktrees belong to heart.
 
     Returns (passed, tail, stage) where stage names which check said no —
@@ -905,14 +905,14 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 skills=feat.get("skills", []),
                 difficulty=feat.get("difficulty", "unknown"),
                 effort=feat.get("effort", ""),
-                # heart owns the mechanism (outcome="blocked", reward withheld);
+                # heart owns the mechanism (outcome="blocked");
                 # plexus owns the vocabulary and what a block costs
                 blocked_marker=_BLOCKED_MARKER,
                 network=spec.network,
             )
             # goal lineage: heart's emit() stamps these into every event of the
             # dispatched episode, so `heart pulse goal <id>` can trace
-            # goal -> feature -> episode -> reward (plexus runs serially, so
+            # goal -> feature -> episode -> outcome (plexus runs serially, so
             # process-global env is safe here)
             os.environ["PLEXUS_GOAL_ID"] = spec.goal_id
             os.environ["PLEXUS_FEATURE_ID"] = fid
@@ -1000,7 +1000,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 attempt += 1
                 continue
 
-            # plexus's own judgment, in its own worktree, never in heart's reward
+            # plexus's own judgment, in its own worktree, never in heart's verdict
             acc_passed, acc_tail, acc_stage = _run_acceptance(
                 repo, base, diff, feat["acceptance"], spec.timeout,
                 parse_expect(feat["spec"]))
@@ -1010,7 +1010,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                           episode_outcome=ep_outcome, check=feat["acceptance"],
                           # `passed` stays the round's single verdict — the
                           # expect block is part of plexus's acceptance, not a
-                          # second reward — and this names which half said no
+                          # second verdict — and this names which half said no
                           failed_stage=acc_stage or None)
 
             # land only when the criterion passes AND nothing regressed AND review ok.

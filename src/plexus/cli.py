@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="the decision (injected into the next attempt for a block)")
     s.add_argument("--root", default=".")
 
-    s = sub.add_parser("export", help="labels.jsonl for marrow: acceptance joined to heart reward")
+    s = sub.add_parser("export", help="labels.jsonl for marrow: acceptance joined to heart outcome")
     s.add_argument("--root", default=".")
     s.add_argument("-o", "--out", default=None, help="default .vascular/plexus/labels.jsonl")
 
