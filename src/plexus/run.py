@@ -488,14 +488,64 @@ def _blocks_so_far(recs: list[dict], goal_id: str, feature_id: str) -> int:
                and r.get("reason_class") == "blocked_on_decision")
 
 
-def _held_before(recs: list[dict], goal_id: str, feature_id: str) -> bool:
-    """This feature already hit the review hold once. Since a still-open
-    escalation would have paused the run before we reached the land branch, a
-    prior hold means it was resolved — the operator signed off, so land it now
-    instead of holding forever."""
-    return any(r.get("goal_id") == goal_id and r.get("feature_id") == feature_id
-               and r["kind"] == "escalation.raised"
-               and r.get("reason_class") == "held_for_review" for r in recs)
+def _resolved_hold(recs: list[dict], goal_id: str, feature_id: str) -> str:
+    """The episode whose diff the operator signed off, or "".
+
+    Set when the feature's latest escalation was a `held_for_review` naming an
+    episode and nothing has been built since. The caller only gets here once
+    that escalation is resolved (an open one pauses the run first), so the
+    answer is "land this exact diff", never "build another one"."""
+    held = ""
+    for r in recs:
+        if r.get("goal_id") != goal_id or r.get("feature_id") != feature_id:
+            continue
+        if r["kind"] == "escalation.raised":
+            ids = r.get("episode_ids") or []
+            held = ids[-1] if r.get("reason_class") == "held_for_review" and ids else ""
+        elif r["kind"] in ("feature.started", "feature.landed"):
+            held = ""
+    return held
+
+
+def _land_held(spec, feat: dict, root: Path, runs_dir, ep_id: str,
+               attempt: int) -> bool:
+    """Land the diff a resolved hold signed off. No episode is built: what
+    lands is what was read. If the diff is gone, no longer applies, or its
+    acceptance now fails on the current base, hold again with the reason --
+    resolving *that* rebuilds the feature, and the rebuild is held in turn."""
+    repo = str(root)
+    held = next((r for r in reversed(ledger.read(root))
+                 if r["kind"] == "escalation.raised"
+                 and ep_id in (r.get("episode_ids") or [])), {})
+    cost = held.get("held_cost") or {}
+    patch = root / runs_dir / ep_id / "diff.patch"
+    why = ""
+    if not patch.is_file():
+        why = f"its saved diff {patch} is gone"
+    else:
+        diff = patch.read_text()
+        ok, tail, stage = _run_acceptance(repo, _head(repo), diff, feat["acceptance"],
+                                          spec.timeout, parse_expect(feat["spec"]))
+        stray = _stray_paths(_diff_paths(repo, diff), feat.get("touches")) if ok else []
+        if not ok:
+            why = f"{stage} no longer passes on the current base: {tail[-300:]}"
+        elif stray:
+            why = "it touches paths the plan does not authorise: " + ", ".join(stray[:10])
+    task_id = events.make_task_id(spec.goal_id, feat["id"], attempt)
+    if why:
+        ledger.record("escalation.raised", goal_id=spec.goal_id, feature_id=feat["id"],
+                      root=root, reason_class="held_stale",
+                      reason=f"the signed-off diff from {ep_id} can't land: {why} "
+                             f"-- resolve to rebuild the feature (the rebuild is held "
+                             f"for sign-off again)",
+                      episode_ids=[ep_id], **cost)
+        return False
+    commit = _land(repo, diff, feat["id"])
+    ledger.record("feature.landed", goal_id=spec.goal_id, feature_id=feat["id"],
+                  root=root, attempt=attempt, task_id=task_id, episode_id=ep_id,
+                  commit=commit, from_held=ep_id, **cost)
+    print(f"landed {feat['id']} from signed-off episode {ep_id}")
+    return True
 
 
 def _diff_paths(repo: str | Path, diff: str) -> list[str]:
@@ -787,6 +837,12 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                           episode_ids=[], **spend)
             return 1
 
+        held_ep = _resolved_hold(recs, spec.goal_id, fid)
+        if held_ep:
+            if not _land_held(spec, feat, root, runs_dir, held_ep, next_attempt - 1):
+                return 1
+            continue
+
         # if a prior block was just answered, carry the answer into the next attempt
         resume_answer = _resume_answer(recs, spec.goal_id, fid)
         retry_context: dict = {"resume_answer": resume_answer} if resume_answer else {}
@@ -941,12 +997,13 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                         "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
                         root=root, reason_class="held_for_review",
                         reason=f"acceptance passed but the review did not run: {review_note}",
-                        episode_ids=[ep_id])
+                        episode_ids=[ep_id], held_cost=attempt_cost)
                     return 1
                 # Software-factory boundary: a green feature whose risk class is
                 # on the goal's review-hold list waits for a human sign-off
-                # instead of auto-landing. Only on the first pass — a prior hold
-                # means it was resolved, so land it now (see _held_before).
+                # instead of auto-landing. Resolving the hold lands this exact
+                # diff on the next run (_land_held); a fresh episode is always
+                # unread, so it is always held.
                 cls = classify(feat)
                 # the plan's class is a prediction; what the diff actually
                 # touches can raise it -- a hook or a manifest runs on your
@@ -960,8 +1017,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 callers = cross_repo_callers(repo, base, diff)
                 if cls not in spec.review_hold and callers:
                     cls = "boundary"
-                if cls in spec.review_hold and not _held_before(
-                        ledger.read(root), spec.goal_id, fid):
+                if cls in spec.review_hold:
                     ledger.record(
                         "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
                         root=root, reason_class="held_for_review",
@@ -974,7 +1030,9 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                                   if flags else "")
                                + (f" (called from: {', '.join(callers[:10])})"
                                   if callers else ""),
-                        episode_ids=[ep_id])
+                        # not cost_usd: cost summers read every record, and this
+                        # attempt's cost lands on whichever record settles it
+                        episode_ids=[ep_id], held_cost=attempt_cost)
                     return 1
                 # Scope gate, last thing before the commit exists. Not a retry:
                 # the agent and the plan disagree about how wide the feature is,
