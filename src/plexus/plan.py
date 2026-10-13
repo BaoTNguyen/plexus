@@ -14,6 +14,7 @@ from pathlib import Path
 
 from heart.env import Workspace
 from heart.runner import SANDBOX_MODE, run_agent, run_contained, turn_profile
+from heart.sandbox import CONTEXT, HOME, JOURNAL, WORK
 from heart.taskspec import TaskSpec
 
 from . import ledger
@@ -64,7 +65,12 @@ missing from the output, so write the mockup you actually want to see.
 `priority` is an integer where 0 is highest. `depends_on` names features in this
 plan; dependencies always run first, with priority breaking ties between ready
 features. Use `needs_upstream` only for public symbols from another project.
-Keep each feature small enough to land in one agent session."""
+Keep each feature small enough to land in one agent session.
+`acceptance` runs from the repository root, which is not always the same
+directory: use paths relative to it, and never cd into an absolute path such as
+/work. It must fail when the feature is missing, so never guard it into a pass
+(`|| exit 0`, `|| true`, skipping when a tool is absent), and never let it only
+re-run tests that already exist."""
 
 
 def matches(path: str, glob: str) -> bool:
@@ -368,6 +374,34 @@ def load_plan(root: str | Path = ".", task_id: str = "") -> list[dict]:
     return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
 
 
+# Paths that exist only inside heart's containers, plus /deps (dependent
+# checkouts, verifiers only). Acceptance runs in a worktree whose path differs
+# by mode, so a criterion naming one of these is wrong somewhere.
+_CONTAINER_PATHS = re.compile(
+    r"(?<![\w.~-])(" + "|".join(re.escape(p) for p in (WORK, CONTEXT, JOURNAL, HOME, "/deps"))
+    + r")(?![\w-])")
+# A guard that turns a failing check into a pass: an explicit `exit 0`, or
+# `|| true` / `|| :` closing the command or a group.
+_SILENT_PASS = re.compile(r"\bexit\s+0\b|\|\|\s*(true|:)\s*(\)|;|$)")
+
+
+def criterion_problems(command: str) -> list[str]:
+    """What is wrong with an acceptance command on its face, before running it.
+
+    Every plexus plan since 09-28 needed `cd /work` removed by hand, and some
+    shipped a `(command -v openssl || exit 0)` guard that turns a missing tool
+    into a pass (F13). Both are visible in the text; a criterion that only
+    re-runs existing tests is not, and check_criteria's base run catches it."""
+    problems = []
+    if m := _CONTAINER_PATHS.search(command):
+        problems.append(f"names {m.group(1)}, a path only some environments have; "
+                        f"use paths relative to the repository root")
+    if m := _SILENT_PASS.search(command):
+        problems.append(f"`{m.group(0).strip()}` can turn a failing check into a "
+                        f"pass; a criterion must fail when the feature is missing")
+    return problems
+
+
 def check_criteria(spec, root: str | Path = ".", task_id: str = "") -> list[tuple[str, str]]:
     """Every acceptance command must FAIL on the base commit. A criterion that
     already passes is vacuous (`true`, `echo ok`) or describes work already done,
@@ -452,7 +486,16 @@ def amend(spec, feature_id: str, root: str | Path = ".",
 
 def approve(spec, root: str | Path = ".", approver: str = "human",
             waive: bool = False, task_id: str = "") -> str:
-    plan_id = load_plan(root, task_id)[0]["plan_id"]
+    plan = load_plan(root, task_id)
+    plan_id = plan[0]["plan_id"]
+    # not waivable: unlike a criterion that passes on base (sometimes the work
+    # really is done), these are wrong whatever the repo looks like
+    broken = [(f["id"], why) for f in plan for why in criterion_problems(f["acceptance"])]
+    if broken:
+        raise SystemExit(
+            "plan not approved — these acceptance criteria are broken as written:\n"
+            + "\n".join(f"  {fid}: {why}" for fid, why in broken)
+            + "\nFix them with `plexus amend <feature> --acceptance '...'`.")
     bad = check_criteria(spec, root, task_id)
     if bad and not waive:
         raise SystemExit(

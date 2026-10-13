@@ -195,6 +195,12 @@ one-way: plexus imports heart; heart never knows plexus exists.
 
 ## The loop
 
+`plan`, `approve` and `run` execute agents or agent-written checks, so they
+refuse to start until you choose where: `HEART_SANDBOX=docker-sbx` (with
+`HEART_SANDBOX_IMAGE`) runs them in containers, and `HEART_SANDBOX=off` runs them
+on this host on purpose, with a warning. Under the sandbox, `run` also refuses an
+image whose baked heart differs from your heart checkout; rebuild it first.
+
 1. **Shape.** `plexus init` scaffolds `plexus.toml`. Goals in prose, ground
    truth declared explicitly (see below), budgets defaulted.
 2. **Plan.** `plexus plan` runs one solo heart episode that turns goal +
@@ -202,7 +208,10 @@ one-way: plexus imports heart; heart never knows plexus exists.
    criterion referencing the ground truth. Plan is written to
    `.plexus/plan.jsonl` and **requires human sign-off** (`plexus approve`)
    before anything runs — warren's gate, kept because the plan is where scope
-   errors are cheapest to catch.
+   errors are cheapest to catch. `approve` refuses a criterion that already
+   passes on the base commit (`--waive` overrides), and one that names a
+   container-only path like `/work` or guards a failure into a pass
+   (`|| exit 0`, `|| true`), which no flag overrides; `plan` flags those too.
 3. **Run.** `plexus run` walks the plan serially. Per feature: build the
    TaskSpec, run the episode, then run the feature's acceptance check on the
    clean result.
@@ -229,6 +238,13 @@ Three kinds, each reduced to an executable check before the run phase starts:
   as **unverifiable**; they block sign-off until the human either supplies a
   check or explicitly waives them. Contradictory ground truth is surfaced at
   plan time, never resolved by silent guessing.
+
+A repo other repos import can name them: `[ground_truth] dependents =
+["plexus", "marrow"]` (registry package names). Each one's own `suite` then runs
+in every episode's verifier against the candidate, with the candidate first on
+`PYTHONPATH` and the dependent's checkout mounted read-only at `/deps/<name>`.
+A change that breaks a caller fails its episode instead of landing green, and a
+dependent plexus can't find stops the run rather than being skipped.
 
 ## Stopping and escalation
 

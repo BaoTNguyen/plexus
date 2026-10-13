@@ -462,6 +462,7 @@ def doctor(fix: bool = False) -> list[str]:
         stale = image_is_stale(IMAGE)
     except Exception as exc:  # heart not importable: say so rather than guess
         stale = f"cannot check image: {exc}"
+    stale = stale or _baked_heart_drift()
     if stale:
         say(f"image {IMAGE}: {stale.splitlines()[0]}")
         if fix:
@@ -501,6 +502,14 @@ def _missing_secrets(cfg: dict | None) -> list[str]:
     if cfg.get("codex"):
         need.append(Path.home() / ".codex" / "auth.json")
     return [str(p) for p in need if not p.is_file()]
+
+
+def _baked_heart_drift() -> str | None:
+    try:  # lazy: heart may be absent, or older than the check
+        from heart.sandbox import baked_heart_drift
+    except Exception:
+        return None
+    return baked_heart_drift(IMAGE)
 
 
 class SandboxNotReady(RuntimeError):
@@ -589,7 +598,12 @@ def ensure() -> list[str]:
         say(f"image {IMAGE}: {stale.splitlines()[0]}")
         say("  not rebuilt: `docker build` is slow and destructive of a working "
             "image -- run it yourself when you have read the reason")
-    else:
+    # unlike a stale recipe, a drifted heart is certain to mislead: verifiers
+    # import the image's heart, so every episode would be judged by old code
+    drift = _baked_heart_drift()
+    if drift:
+        stop(f"image {IMAGE}: {drift}")
+    if not stale:
         say(f"image {IMAGE}: ok")
 
     for host in local_model_hosts():

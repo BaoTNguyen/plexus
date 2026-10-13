@@ -61,6 +61,10 @@ def _referenced(recs: list[dict]) -> set[str]:
         if r["kind"] == "escalation.raised":
             if (r.get("goal_id"), r.get("feature_id")) not in resolved:
                 open_escalations.update(r.get("episode_ids") or [])
+            # a resolved hold still owes a landing: run lands this exact diff
+            if (r.get("reason_class") == "held_for_review"
+                    and (r.get("goal_id"), r.get("feature_id")) not in landed_features):
+                keep.update(r.get("episode_ids") or [])
         elif r["kind"] == "feature.failed" and r.get("episode_id"):
             if (r.get("goal_id"), r.get("feature_id")) not in landed_features:
                 keep.add(r["episode_id"])

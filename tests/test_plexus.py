@@ -14,8 +14,10 @@ os.environ["EVENT_JOURNAL_DIR"] = str(tmp / "journal")
 os.environ["VASCULAR_HOME"] = str(tmp / "vascular")
 
 here = Path(__file__).resolve()
-for p in (here.parents[1] / "src", here.parents[2] / "heart" / "src"):
-    sys.path.insert(0, str(p))
+sys.path.insert(0, str(here.parents[1] / "src"))
+# heart beside this checkout, but behind any heart already on the path: a
+# dependent verifier puts the candidate heart first on PYTHONPATH (F85)
+sys.path.append(str(here.parents[2] / "heart" / "src"))
 from plexus import events, ledger, observe  # noqa: E402
 from plexus import vascular_state  # noqa: E402
 
@@ -376,8 +378,15 @@ assert n == 3 and counts["wrong_thing_built"] == 1, counts
 assert len(path.read_text().strip().splitlines()) == 3
 
 # --- prune: keeps what `why` and an open escalation still need ---
+# f3 was held and signed off: the next run lands ep-d's diff, so it must survive
+_episode("ep-d", "pass", 0.9, "xg-f3-a1")
+ledger.record("escalation.raised", goal_id="xg", feature_id="f3", root=xr,
+              reason_class="held_for_review", reason="sign off", episode_ids=["ep-d"])
+ledger.record("escalation.resolved", goal_id="xg", feature_id="f3", root=xr,
+              resolution="ok")
 prunable, kept, _ = plan_prune(xr, days=0)
 names = {d.name for d in prunable}
+assert "ep-d" not in names, "a resolved hold's episode is what lands next"
 assert "ep-c" not in names, "episode behind an open escalation must survive"
 assert "ep-b" in names, "a landed feature's episode is prunable"
 # ep-a failed but f1 later landed, so it is history the ledger already tells
@@ -548,12 +557,14 @@ assert load_spec(up).goal_id == "upstream-y"       # scaffolded spec is valid
 assert registry.seed_upstream(["heart.x:Y"], "g-down", {"heart": str(up)}) == []  # idempotent
 
 # --- review hold-gate: held classes escalate before landing, then land once resolved
-from plexus.run import _held_before  # noqa: E402
+from plexus.run import _resolved_hold  # noqa: E402
 hr = tmp / "hold-repo"; vascular_state.plexus_dir(hr).mkdir(parents=True)
-assert not _held_before([], "g", "f1")
+assert _resolved_hold([], "g", "f1") == ""
 ledger.record("escalation.raised", goal_id="g", feature_id="f1", root=hr,
-              reason_class="held_for_review", reason="sign off")
-assert _held_before(ledger.read(hr), "g", "f1")   # a prior hold means it was resolved -> land
+              reason_class="held_for_review", reason="sign off", episode_ids=["e1"])
+assert _resolved_hold(ledger.read(hr), "g", "f1") == "e1"   # land e1's diff, not a new one
+ledger.record("feature.started", goal_id="g", feature_id="f1", root=hr, attempt=2)
+assert _resolved_hold(ledger.read(hr), "g", "f1") == ""     # a rebuild is unread again
 # the classes that can break something no test covers, or run on your machine
 # once landed, hold by default — a spec that says nothing must not mean "land
 # the ledger schema unread", nor "land a new SessionStart hook unread"
@@ -951,6 +962,7 @@ def test_a_routable_egress_network_is_reported_not_tolerated(monkeypatch):
     monkeypatch.setattr(sandbox, "_docker",
                         lambda *a, **k: (0, "false") if a[:2] == ("network", "inspect") else (0, ""))
     monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None)
+    monkeypatch.setattr("plexus.sandbox._baked_heart_drift", lambda: None)
 
     out = "\n".join(sandbox.doctor())
     assert "NOT --internal" in out
@@ -984,6 +996,7 @@ def test_fix_creates_the_network_and_starts_the_proxy(monkeypatch, tmp_path):
     monkeypatch.setattr(sandbox, "proxy_script", lambda: script)
     monkeypatch.setattr(sandbox, "reap", lambda: (0, 0))
     monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None)
+    monkeypatch.setattr("plexus.sandbox._baked_heart_drift", lambda: None)
 
     sandbox.doctor(fix=True)
     assert ("network", "create", "--internal", sandbox.NETWORK) in calls
@@ -1139,6 +1152,7 @@ def test_fix_provisions_a_web_lane_with_its_own_proxy_and_filter(monkeypatch, tm
     monkeypatch.setattr(sandbox, "reap", lambda: (0, 0))
     monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {"claude": 100.0})
     monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None)
+    monkeypatch.setattr("plexus.sandbox._baked_heart_drift", lambda: None)
 
     sandbox.doctor(fix=True)
     assert ("network", "create", "--internal", sandbox.WEB_NETWORK) in calls
