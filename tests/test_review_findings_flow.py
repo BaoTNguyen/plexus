@@ -1,5 +1,5 @@
 """Review findings end to end: landing with concerns, a rejection's findings
-carried into the next attempt, and a resolved hold's answer carried likewise.
+carried into the next attempt, and a resolved hold landing what was signed off.
 
 No real network/db/git against the checkout: each test builds its own scratch
 git repo under tmp_path and chdirs there first. `heart`'s sandbox dispatch
@@ -172,38 +172,62 @@ def test_review_rejected_carries_findings_into_next_attempts_retry_context(
     assert retry_context["review_findings"] == rejecting
 
 
-def test_resolved_held_for_review_escalation_carries_answer_into_retry_context(
-        tmp_path, monkeypatch):
+def _hold_then_resolve(tmp_path, monkeypatch, fid="f3"):
     repo = tmp_path / "goal"
     _init_repo(repo)
-    feat = _feature("f3", "feature.txt")
-    _write_plan(repo, feat)
-    # a non-"blocked_on_decision" escalation class: acceptance passes but the
-    # feature's risk class is held for sign-off (review.classify == "leaf")
+    _write_plan(repo, _feature(fid, "feature.txt"))
+    # the feature's risk class (review.classify == "leaf") is held for sign-off
     spec = _spec("g3", review_hold=("leaf",))
     _approve_plan(spec, repo)
-
-    diff = _diff_adding_file(repo, "feature.txt", "hi\n")
+    diff = _diff_adding_file(repo, "feature.txt", "signed off\n")
     monkeypatch.setattr(run, "_build_sandbox_retrying",
                         _fake_build_sequence([("ep-h1", "pass", None, None, diff)]))
+    assert run.run(spec, root=repo) == 1
+    raised = [r for r in ledger.read(repo) if r["kind"] == "escalation.raised"]
+    assert [r["reason_class"] for r in raised] == ["held_for_review"]
+    ledger.record("escalation.resolved", goal_id=spec.goal_id, feature_id=fid,
+                  root=repo, resolution="sign-off")
 
+    def _no_build(*a, **k):
+        raise AssertionError("a resolved hold must land the held diff, not rebuild")
+    monkeypatch.setattr(run, "_build_sandbox_retrying", _no_build)
+    return repo, spec
+
+
+def test_resolved_hold_lands_the_signed_off_diff_without_rebuilding(
+        tmp_path, monkeypatch):
+    repo, spec = _hold_then_resolve(tmp_path, monkeypatch)
+    assert run.run(spec, root=repo) == 1  # lands, then the (failing) suite escalates
+
+    recs = ledger.read(repo)
+    landed = next(r for r in recs if r["kind"] == "feature.landed")
+    assert landed["from_held"] == "ep-h1" and landed["episode_id"] == "ep-h1"
+    assert (repo / "feature.txt").read_text() == "signed off\n"
+    assert sum(r["kind"] == "feature.started" for r in recs) == 1
+
+
+def test_resolved_hold_whose_diff_no_longer_passes_is_held_again(
+        tmp_path, monkeypatch):
+    repo, spec = _hold_then_resolve(tmp_path, monkeypatch)
+    monkeypatch.setattr(run, "_run_acceptance",
+                        lambda *a, **k: (False, "patch does not apply", "acceptance"))
     assert run.run(spec, root=repo) == 1
 
     recs = ledger.read(repo)
-    raised = next(r for r in recs if r["kind"] == "escalation.raised"
-                  and r["feature_id"] == "f3")
-    assert raised["reason_class"] == "held_for_review"
+    assert not any(r["kind"] == "feature.landed" for r in recs)
+    assert recs[-1]["kind"] == "escalation.raised"
+    assert recs[-1]["reason_class"] == "held_stale"
+    assert "patch does not apply" in recs[-1]["reason"]
+    assert not (repo / "feature.txt").exists()
 
+    # resolving the stale hold rebuilds -- and the rebuild is held, not landed
     ledger.record("escalation.resolved", goal_id=spec.goal_id, feature_id="f3",
-                  root=repo, resolution="sign-off: land it as-is")
-
+                  root=repo, resolution="rebuild")
+    monkeypatch.setattr(run, "_run_acceptance", lambda *a, **k: (True, "", ""))
+    diff = _diff_adding_file(repo, "feature.txt", "rebuilt\n")
     monkeypatch.setattr(run, "_build_sandbox_retrying",
                         _fake_build_sequence([("ep-h2", "pass", None, None, diff)]))
-    assert run.run(spec, root=repo) == 1  # lands this time, then the (failing) suite escalates
-
-    started = [r for r in ledger.read(repo)
-              if r["kind"] == "feature.started" and r["feature_id"] == "f3"]
-    assert len(started) == 2
-    resume_answer = started[1]["retry_context"]["resume_answer"]
-    assert "sign-off: land it as-is" in resume_answer
-    assert raised["reason"] in resume_answer
+    assert run.run(spec, root=repo) == 1
+    last = ledger.read(repo)[-1]
+    assert last["reason_class"] == "held_for_review" and last["episode_ids"] == ["ep-h2"]
+    assert not (repo / "feature.txt").exists()
