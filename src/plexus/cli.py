@@ -169,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {path} — edit it, then `plexus plan`")
         return 0
     if args.cmd == "plan":
-        from .plan import make_plan
+        from .plan import criterion_problems, make_plan
         from .spec import load_spec
         from .review import classify
         feats = make_plan(load_spec(args.root), args.root, task_id=args.task)
@@ -179,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
             # the class is the review budget, and this is the last moment it can
             # be changed for free — narrow a `touches` list here, not after
             print(f"  [{classify(f)}] {f['id']}: {f['title']}")
+            for why in criterion_problems(f["acceptance"]):
+                print(f"      acceptance {why} -- amend before approving")
         return 0
     if args.cmd == "approve":
         from .plan import approve

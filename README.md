@@ -208,7 +208,10 @@ image whose baked heart differs from your heart checkout; rebuild it first.
    criterion referencing the ground truth. Plan is written to
    `.plexus/plan.jsonl` and **requires human sign-off** (`plexus approve`)
    before anything runs — warren's gate, kept because the plan is where scope
-   errors are cheapest to catch.
+   errors are cheapest to catch. `approve` refuses a criterion that already
+   passes on the base commit (`--waive` overrides), and one that names a
+   container-only path like `/work` or guards a failure into a pass
+   (`|| exit 0`, `|| true`), which no flag overrides; `plan` flags those too.
 3. **Run.** `plexus run` walks the plan serially. Per feature: build the
    TaskSpec, run the episode, then run the feature's acceptance check on the
    clean result.
