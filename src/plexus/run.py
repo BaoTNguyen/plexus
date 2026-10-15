@@ -269,7 +269,6 @@ def _feature_state(recs: list[dict], goal_id: str,
     not charge the feature for it."""
     landed = False
     max_attempt = 0
-    open_escalations = 0
     budget_used = 0
     pending = False       # an unflushed feature.started
     had_sandbox_failure = False
@@ -295,17 +294,15 @@ def _feature_state(recs: list[dict], goal_id: str,
             had_sandbox_failure = True
         elif kind == "seat.exhausted":
             had_seat_exhausted = True
-        elif kind == "escalation.raised":
-            open_escalations += 1
         elif kind == "escalation.resolved":
-            open_escalations -= 1
             budget_used = 0  # resolving hands the feature a fresh budget
             pending = False
     if pending and not ((had_sandbox_failure or had_seat_exhausted) and not had_failed):
         budget_used += 1
     if landed:
         return "landed", max_attempt, budget_used
-    state = "escalated" if open_escalations > 0 else "open"
+    blocked = any(e["feature_id"] == feature_id for e in ledger.open_escalations(recs, goal_id))
+    state = "escalated" if blocked else "open"
     return state, max_attempt + 1, budget_used
 
 

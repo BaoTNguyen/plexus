@@ -239,20 +239,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "resolve":
         from . import ledger
-        from .serve import _open_escalations
         from .spec import load_spec
         goal_id = load_spec(args.root).goal_id
-        # guard against a typo'd feature id silently recording a resolution for a
-        # block that isn't open — which leaves the real escalation in place and
-        # the run still paused (found in the end-to-end shakeout).
-        open_ids = {e["feature_id"] for e in _open_escalations(ledger.read(args.root), goal_id)}
-        if args.feature not in open_ids:
+        # a typo'd feature id must not record a resolution for a block that
+        # isn't open -- the real escalation would stay and the run stay paused
+        open_ids = ledger.resolve(args.root, goal_id, args.feature, args.answer)
+        if open_ids is not None:
             print(f"no open escalation for {args.feature!r} in {goal_id}."
                   + (" Open: " + ", ".join(sorted(open_ids)) if open_ids
                      else " Nothing is blocked."))
             return 1
-        ledger.record("escalation.resolved", goal_id=goal_id, feature_id=args.feature,
-                      root=args.root, resolution=args.answer)
         print(f"resolved {args.feature}; re-run `plexus run` to resume")
         return 0
     if args.cmd == "export":
