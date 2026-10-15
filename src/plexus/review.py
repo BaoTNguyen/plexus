@@ -213,22 +213,6 @@ def _symbol_delta(repo: str | Path, commit: str,
     return added, removed
 
 
-def added_symbols(repo: str | Path, commit: str, paths: list[str]) -> set[str]:
-    """Public top-level names this commit introduced."""
-    return _symbol_delta(repo, commit, paths)[0]
-
-
-def removed_symbols(repo: str | Path, commit: str, paths: list[str]) -> set[str]:
-    """Public top-level names this commit deleted or renamed away.
-
-    The mirror of `added_symbols`, and the more urgent half: an unplanned export
-    is clutter, an unplanned deletion is a caller somewhere that no longer
-    resolves. In this stack that caller is often in another repo — plexus imports
-    heart by name — so a removal nothing declared is the failure mode the pin
-    test exists to catch, seen one step earlier."""
-    return _symbol_delta(repo, commit, paths)[1]
-
-
 def _declared(feat: dict) -> set[str]:
     """Contract entries reduced to bare symbol names: `review.report(x) -> str`
     and `class Foo` both have to match what the AST actually sees."""

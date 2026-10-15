@@ -38,10 +38,6 @@ def plan_log_path(root: str | Path) -> Path:
     return plexus_dir(root) / "plan.log"
 
 
-def plan_raw_log_path(root: str | Path) -> Path:
-    return plexus_dir(root) / "plan.raw.log"
-
-
 def overview_dir(root: str | Path) -> Path:
     return plexus_dir(root) / "overview"
 
@@ -54,16 +50,8 @@ def transcripts_dir(root: str | Path) -> Path:
     return plexus_dir(root) / "transcripts"
 
 
-def llm_runs_dir(root: str | Path) -> Path:
-    return plexus_dir(root) / "llm_runs"
-
-
 def jobs_dir(root: str | Path) -> Path:
     return plexus_dir(root) / "jobs"
-
-
-def held_dir(root: str | Path) -> Path:
-    return plexus_dir(root) / "held"
 
 
 def runs_dir(root: str | Path) -> Path:

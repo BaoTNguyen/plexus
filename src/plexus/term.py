@@ -505,35 +505,6 @@ def _reap_idle() -> None:
             _sessions.pop(key, None)
 
 
-def stream(session: Session, write, keepalive: float = 15.0) -> None:
-    """Blocking SSE loop. `write` takes bytes and may raise on a dropped client.
-
-    PTY output is arbitrary bytes and SSE is a line-oriented text protocol, so
-    every chunk goes out base64-encoded rather than hoping no newline or invalid
-    UTF-8 ever appears mid-escape-sequence.
-    """
-    queue, backlog = session.subscribe()
-    try:
-        if backlog:
-            write(_sse(backlog))
-        while True:
-            try:
-                chunk = queue.get(timeout=keepalive)
-            except Empty:
-                write(b": keepalive\n\n")  # holds proxies and idle sockets open
-                continue
-            if chunk is None:
-                write(b"event: exit\ndata: \n\n")
-                return
-            write(_sse(chunk))
-    finally:
-        session.unsubscribe(queue)
-
-
-def _sse(chunk: bytes) -> bytes:
-    return b"data: " + base64.b64encode(chunk) + b"\n\n"
-
-
 # --- WebSocket -------------------------------------------------------------
 #
 # Hand-rolled because `http.server` has none and the alternative is a
