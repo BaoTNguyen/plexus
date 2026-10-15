@@ -591,7 +591,6 @@ assert any(r["kind"] == "escalation.resolved" and r["feature_id"] == "realf"
 # thousands of cached tokens. Counting only tokens_in understated every turn;
 # adding cache into it would overcharge reads tenfold. Both are wrong, so the
 # buckets stay separate all the way from heart's event to the dashboard.
-from heart.runner import CACHE_MULTIPLIERS  # noqa: E402
 from plexus.run import _episode_cost  # noqa: E402
 
 eps = [{"usage": {"cost_usd": 0.10, "tokens_in": 15, "tokens_out": 2692,
@@ -606,7 +605,6 @@ assert agg["cost_usd"] == 0.15, agg
 assert "cache_read" not in _episode_cost([{"usage": {}}])
 
 # end to end through the dashboard: a synthetic journal, real arithmetic
-import shutil  # noqa: E402
 journal = tmp / "cache-journal"; journal.mkdir()
 prior_journal = os.environ["EVENT_JOURNAL_DIR"]
 os.environ["EVENT_JOURNAL_DIR"] = str(journal)
