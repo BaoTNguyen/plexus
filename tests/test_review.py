@@ -178,7 +178,7 @@ assert "2 of 2 features will need line-by-line review." not in review.preview(re
 assert "1 of 2 features will need line-by-line review." in review.preview(repo)
 
 # --- a deletion nobody declared -------------------------------------------
-# The half `added_symbols` alone cannot see. A commit that quietly drops a
+# The half a check for added names alone cannot see. A commit that quietly drops a
 # public name leaves callers unresolved, and in this stack the caller is often
 # in the next repo up, so this is the pin test's failure one step earlier.
 c3 = commit({"src/two.py": "def beta():\n    return 2\n"}, "plexus: land f3")
