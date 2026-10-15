@@ -125,7 +125,7 @@ ledger.record("feature.landed", goal_id="g1", feature_id="f2", root=repo, commit
 # _stray_paths is only correct if it is fed git's own path format. Unit-testing
 # the matcher against hand-written strings would not catch a `git apply
 # --numstat` that returned `b/src/one.py`, so compose the two for real.
-from plexus.run import _diff_paths  # noqa: E402
+from plexus.review import diff_paths as _diff_paths  # noqa: E402
 
 (repo / "src" / "three.py").write_text("x = 1\n")
 (repo / "LEDGER.md").write_text("law\n")

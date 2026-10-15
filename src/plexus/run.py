@@ -39,7 +39,7 @@ from . import vascular_state
 from .plan import matches as _matches
 from .plan import execution_order, load_plan, parse_expect
 from .registry import load_registry, seed_upstream
-from .review import classify, cross_repo_callers, exec_surface, report, suspicious
+from .review import classify, cross_repo_callers, diff_paths, exec_surface, report, suspicious
 
 # heart episode outcomes that are mechanical failures — no valid applied diff to
 # judge a criterion against, so acceptance is skipped and it's a coding failure.
@@ -528,7 +528,7 @@ def _land_held(spec, feat: dict, root: Path, runs_dir, ep_id: str,
         diff = patch.read_text()
         ok, tail, stage = _run_acceptance(repo, _head(repo), diff, feat["acceptance"],
                                           spec.timeout, parse_expect(feat["spec"]))
-        stray = _stray_paths(_diff_paths(repo, diff), feat.get("touches")) if ok else []
+        stray = _stray_paths(diff_paths(repo, diff), feat.get("touches")) if ok else []
         if not ok:
             why = f"{stage} no longer passes on the current base: {tail[-300:]}"
         elif stray:
@@ -550,15 +550,6 @@ def _land_held(spec, feat: dict, root: Path, runs_dir, ep_id: str,
     return True
 
 
-def _diff_paths(repo: str | Path, diff: str) -> list[str]:
-    """The files the episode's diff touches, per git itself. `--numstat` with a
-    dry run parses the patch without changing anything; the third column is the
-    path (binary files report `-`/`-` counts, still with a path)."""
-    r = subprocess.run(["git", "-C", str(repo), "apply", "--numstat", "-"],
-                       input=diff, text=True, capture_output=True, check=True)
-    return [line.split("\t", 2)[2] for line in r.stdout.splitlines() if "\t" in line]
-
-
 def _stray_paths(paths: list[str], touches: list[str] | None) -> list[str]:
     """Paths the diff touched that the plan never authorised.
 
@@ -575,7 +566,7 @@ def _land(repo: str | Path, diff: str, feature_id: str) -> str:
     is a real working tree: it holds the user's unrelated edits and plexus's own
     `.vascular/plexus/runs/` episode dumps, and a blanket add would sweep both into the feature
     commit and into the goal's history."""
-    paths = _diff_paths(repo, diff)
+    paths = diff_paths(repo, diff)
     subprocess.run(["git", "-C", str(repo), "apply", "--whitespace=nowarn"],
                    input=diff, text=True, capture_output=True, check=True)
     _git(repo, "add", "--", *paths)  # tracks new files so the pathspec commit sees them
@@ -1049,7 +1040,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 # the plan's class is a prediction; what the diff actually
                 # touches can raise it -- a hook or a manifest runs on your
                 # machine whatever the plan called the feature
-                runs_here = exec_surface(_diff_paths(repo, diff))
+                runs_here = exec_surface(diff_paths(repo, diff))
                 flags = suspicious(repo, base, diff)
                 if cls not in spec.review_hold:
                     cls = "exec" if runs_here else "suspect" if flags else cls
@@ -1078,7 +1069,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 # Scope gate, last thing before the commit exists. Not a retry:
                 # the agent and the plan disagree about how wide the feature is,
                 # and only a human can say which of the two is wrong.
-                stray = _stray_paths(_diff_paths(repo, diff), feat.get("touches"))
+                stray = _stray_paths(diff_paths(repo, diff), feat.get("touches"))
                 if stray:
                     ledger.record(
                         "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
