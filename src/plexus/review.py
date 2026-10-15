@@ -299,16 +299,34 @@ def preview(root: str | Path = ".") -> str:
     return "\n".join(lines)
 
 
-def _cross_repo_diff_paths(repo: str | Path, diff: str) -> list[str]:
-    """Same trick as run.py's `_diff_paths` (not imported: run.py imports this
-    module, and the other direction would be a cycle) -- `git apply --numstat`
-    parses a patch without touching the working tree."""
+def diff_paths(repo: str | Path, diff: str, strict: bool = True) -> list[str]:
+    """Every path a diff touches, per git itself. `git apply --numstat -z`
+    parses the patch without changing anything and prints names raw; without
+    -z a non-ASCII name comes back C-quoted and `git add` cannot find it. Even
+    with -z a rename reports only its destination, so the source comes from
+    the patch's own `rename from` header: landing a rename has to stage the
+    deletion too. Lives here, not in run.py, because run imports review.
+
+    strict=False answers [] for a diff git cannot parse, for callers that
+    treat "unknown" as "nothing to check"."""
     try:
-        r = subprocess.run(["git", "-C", str(repo), "apply", "--numstat", "-"],
+        r = subprocess.run(["git", "-C", str(repo), "apply", "--numstat", "-z", "-"],
                            input=diff, text=True, capture_output=True, check=True)
     except (subprocess.CalledProcessError, OSError):
+        if strict:
+            raise
         return []
-    return [line.split("\t", 2)[2] for line in r.stdout.splitlines() if "\t" in line]
+    paths = [rec.split("\t", 2)[2] for rec in r.stdout.split("\0") if rec.count("\t") >= 2]
+    paths += [_unquote(p) for p in re.findall(r"(?m)^rename from (.+)$", diff)]
+    return list(dict.fromkeys(paths))
+
+
+def _unquote(path: str) -> str:
+    """Undo git's C-quoting of a header path (`"caf\\303\\251.md"`)."""
+    if not (path.startswith('"') and path.endswith('"')):
+        return path
+    return (path[1:-1].encode("latin-1", "backslashreplace").decode("unicode_escape")
+            .encode("latin-1").decode("utf-8"))
 
 
 def _diff_file_patches(diff: str) -> dict[str, str]:
@@ -411,7 +429,7 @@ def cross_repo_callers(repo: str | Path, base: str, diff: str) -> list[str]:
         if not pkgs:
             return []
         patches = _diff_file_patches(diff)
-        touched = set(_cross_repo_diff_paths(repo_path, diff)) & set(patches)
+        touched = set(diff_paths(repo_path, diff, strict=False)) & set(patches)
         prefix = f"{pkg_base}/" if pkg_base else ""
         changed: set[str] = set()
         for path in touched:

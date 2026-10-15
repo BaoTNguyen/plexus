@@ -196,7 +196,8 @@ assert _feature_state([{"goal_id": "other", "kind": "feature.landed",
 # --- _land commits only the diff's paths, not the whole dirty tree ---
 import subprocess  # noqa: E402
 
-from plexus.run import _diff_paths, _land  # noqa: E402
+from plexus.review import diff_paths as _diff_paths  # noqa: E402
+from plexus.run import _land  # noqa: E402
 
 g = tmp / "landrepo"
 g.mkdir()
@@ -226,6 +227,17 @@ committed = G("show", "--name-only", "--format=", "HEAD").split()
 assert committed == ["seed.txt"], f"land swept in extra files: {committed}"
 assert (vascular_state.runs_dir(g) / "episode.json").exists() and (g / "mine.txt").exists()
 assert "mine.txt" in G("status", "--porcelain"), "unrelated edit was consumed"
+
+# a rename touches its source too, and a non-ASCII name must reach git add raw,
+# not C-quoted -- otherwise the commit keeps the old file, or add fails after
+# apply has already changed the tree
+(g / "old.py").write_text("x = 1\n"); G("add", "-A"); G("commit", "-qm", "old")
+G("mv", "old.py", "new.py"); (g / "café.md").write_text("menu\n"); G("add", "-A")
+diff = G("diff", "--cached"); G("reset", "-q", "--hard")
+assert sorted(_diff_paths(g, diff)) == ["café.md", "new.py", "old.py"], _diff_paths(g, diff)
+_land(g, diff, "f2")
+assert "old.py" not in G("ls-files", "-z").split("\0"), "rename landed without deleting its source"
+assert "café.md" in G("ls-files", "-z").split("\0")
 
 # --- approve gate: criteria must fail on the base commit ---
 from plexus import plan as planmod  # noqa: E402
