@@ -79,35 +79,40 @@ def _diff_delete(repo: Path) -> str:
 
 
 def test_changed_public_function_has_a_caller(tmp_path):
-    lib, app = _make_lib(tmp_path), _make_app(tmp_path)
+    lib = _make_lib(tmp_path)
+    _make_app(tmp_path)  # the caller repo cross_repo_callers scans
     base = _git_out(lib, "rev-parse", "HEAD")
     diff = _diff_edit(lib, API_SRC.replace("return 1", "return 100"))
     assert review.cross_repo_callers(lib, base, diff) == ["app/app.py:1"]
 
 
 def test_changed_function_nobody_imports_has_no_caller(tmp_path):
-    lib, app = _make_lib(tmp_path), _make_app(tmp_path)
+    lib = _make_lib(tmp_path)
+    _make_app(tmp_path)  # the caller repo cross_repo_callers scans
     base = _git_out(lib, "rev-parse", "HEAD")
     diff = _diff_edit(lib, API_SRC.replace("return 2", "return 200"))
     assert review.cross_repo_callers(lib, base, diff) == []
 
 
 def test_changed_private_helper_has_no_caller(tmp_path):
-    lib, app = _make_lib(tmp_path), _make_app(tmp_path)
+    lib = _make_lib(tmp_path)
+    _make_app(tmp_path)  # the caller repo cross_repo_callers scans
     base = _git_out(lib, "rev-parse", "HEAD")
     diff = _diff_edit(lib, API_SRC.replace("return 3", "return 300"))
     assert review.cross_repo_callers(lib, base, diff) == []
 
 
 def test_new_public_name_has_no_caller(tmp_path):
-    lib, app = _make_lib(tmp_path), _make_app(tmp_path)
+    lib = _make_lib(tmp_path)
+    _make_app(tmp_path)  # the caller repo cross_repo_callers scans
     base = _git_out(lib, "rev-parse", "HEAD")
     diff = _diff_edit(lib, API_SRC + "\n\ndef h():\n    return 4\n")
     assert review.cross_repo_callers(lib, base, diff) == []
 
 
 def test_deleted_function_still_has_a_caller(tmp_path):
-    lib, app = _make_lib(tmp_path), _make_app(tmp_path)
+    lib = _make_lib(tmp_path)
+    _make_app(tmp_path)  # the caller repo cross_repo_callers scans
     base = _git_out(lib, "rev-parse", "HEAD")
     diff = _diff_delete(lib)
     assert review.cross_repo_callers(lib, base, diff) == ["app/app.py:1"]

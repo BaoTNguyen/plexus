@@ -324,6 +324,7 @@ def test_orchestrated_style_episode_with_a_limit_line_does_not_raise_seat_exhaus
     code = run_mod._walk(_spec(orchestrate=True), repo, "runs", 1, "")
     recs = ledger.read(repo)
 
+    assert code == 0
     assert not any(r["kind"] == "seat.exhausted" for r in recs)
     assert not any(r.get("reason_class") == "seat_exhausted" for r in recs
                    if r["kind"] == "escalation.raised")
