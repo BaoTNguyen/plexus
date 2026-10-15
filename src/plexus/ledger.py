@@ -83,3 +83,55 @@ def read(root: str | Path = ".") -> list[dict]:
         except json.JSONDecodeError:
             continue  # torn tail line from a crash mid-append
     return out
+
+
+#: feature_id for an escalation about the goal as a whole -- the final-suite
+#: regression has no feature, and without a key it could be neither seen nor
+#: resolved.
+GOAL_LEVEL = "__goal__"
+
+
+def open_escalations(recs: list[dict], goal_id: str) -> list[dict]:
+    """The goal's open escalations, one per feature, latest raise last.
+
+    The one rule for "is this blocked": status, the dashboard, resolve and
+    prune all ask here. Records are walked in order with a per-feature count
+    that never drops below zero, so resolving the same block twice does not
+    bank a credit that silently cancels the next one. Each entry carries the
+    latest raise's reason and the episodes raised since the feature was last
+    clear -- the ones still explaining an open question.
+    """
+    count: dict[str, int] = {}
+    last: dict[str, tuple[int, dict]] = {}
+    episodes: dict[str, list[str]] = {}
+    for i, r in enumerate(recs):
+        if r.get("goal_id") != goal_id or r.get("kind") not in (
+                "escalation.raised", "escalation.resolved"):
+            continue
+        fid = r.get("feature_id") or GOAL_LEVEL
+        if r["kind"] == "escalation.raised":
+            count[fid] = count.get(fid, 0) + 1
+            last[fid] = (i, r)
+            episodes.setdefault(fid, []).extend(r.get("episode_ids") or [])
+        else:
+            count[fid] = max(0, count.get(fid, 0) - 1)
+            if not count[fid]:
+                episodes.pop(fid, None)
+    open_ids = sorted((f for f, n in count.items() if n > 0), key=lambda f: last[f][0])
+    return [{"feature_id": f, "count": count[f],
+             "reason_class": last[f][1].get("reason_class", "?"),
+             "reason": last[f][1].get("reason", ""),
+             "episode_ids": episodes.get(f, [])} for f in open_ids]
+
+
+def resolve(root: str | Path, goal_id: str, feature_id: str, answer: str) -> list[str] | None:
+    """Record an answer to an open escalation. Returns None when it was
+    recorded, else the feature ids that *are* open: a typo'd id, or a second
+    tab resolving what the first already did, must not write a resolution for
+    a block that is not there."""
+    open_ids = [e["feature_id"] for e in open_escalations(read(root), goal_id)]
+    if feature_id not in open_ids:
+        return open_ids
+    record("escalation.resolved", goal_id=goal_id, feature_id=feature_id, root=root,
+           resolution=answer)
+    return None

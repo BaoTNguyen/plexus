@@ -187,7 +187,7 @@ def _goal_lifecycle(root: Path) -> dict:
                         for r in goal_recs)
     delivery = next((str(r.get("result", "")) for r in reversed(goal_recs)
                      if r.get("kind") == "delivery.requested"), "")
-    open_escalations = _open_escalations(recs, spec.goal_id)
+    open_escalations = ledger.open_escalations(recs, spec.goal_id)
     if _running(root):
         state = "running"
     elif job["running"] and job["kind"] == "plan":
@@ -281,24 +281,6 @@ def _running(root: Path) -> bool:
         return True
     finally:
         f.close()
-
-
-def _open_escalations(recs: list[dict], goal_id: str) -> list[dict]:
-    """Per feature, raised minus resolved > 0 -> open, carrying the latest
-    reason. Mirrors observe.status's counting so the two never disagree."""
-    by_feat: dict[str, list[dict]] = {}
-    for r in recs:
-        if r.get("goal_id") == goal_id and r.get("feature_id"):
-            by_feat.setdefault(r["feature_id"], []).append(r)
-    out = []
-    for fid, rs in by_feat.items():
-        raised = [r for r in rs if r["kind"] == "escalation.raised"]
-        if len(raised) - sum(r["kind"] == "escalation.resolved" for r in rs) > 0:
-            last = raised[-1]
-            out.append({"feature_id": fid,
-                        "reason_class": last.get("reason_class", "?"),
-                        "reason": last.get("reason", "")})
-    return out
 
 
 def _fleet_state(server) -> dict:
@@ -553,7 +535,7 @@ def _goal_detail(root: Path) -> dict:
             "status": " · ".join(observe.status(str(root))[0]),
             "insights": observe.insights(str(root)),
             "features": features,
-            "escalations": _open_escalations(recs, goal_id),
+            "escalations": ledger.open_escalations(recs, goal_id),
             "activity": activity,
             "why": diagnose.why(str(root))}
 
@@ -760,7 +742,7 @@ def _dashboard(roots: list[Path], window_h: float = 24.0, base: Path | None = No
                 plexus_spend_7d += cost
                 landed_7d += rec.get("kind") == "feature.landed"
         plexus_spend_24h += project_24h
-        for escalation in _open_escalations(recs, project["goal_id"]):
+        for escalation in ledger.open_escalations(recs, project["goal_id"]):
             alerts.append({**escalation, "severity": "blocked",
                            "project_id": project["project_id"],
                            "goal_id": project["goal_id"]})
@@ -1233,7 +1215,7 @@ def _goal_run_state(root: Path) -> str:
     same source `plexus status` reads."""
     recs = ledger.read(root)
     gid = _goal_id(root)
-    if _open_escalations(recs, gid):
+    if ledger.open_escalations(recs, gid):
         return "escalated"
     try:
         plan = load_plan(root)
@@ -1837,9 +1819,11 @@ class _Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/stop":
                 _stop(root)
             elif u.path == "/api/resolve":
-                ledger.record("escalation.resolved", goal_id=_goal_id(root),
-                              feature_id=data["feature"], root=root,
-                              resolution=data.get("answer", "resolved"))
+                open_ids = ledger.resolve(root, _goal_id(root), data["feature"],
+                                          data.get("answer", "resolved"))
+                if open_ids is not None:
+                    return self._json({"error": f"no open escalation for {data['feature']!r}",
+                                       "open": open_ids}, 409)
             else:
                 return self._json({"error": "not found"}, 404)
         except (ValueError, TypeError, OSError, tomllib.TOMLDecodeError) as e:

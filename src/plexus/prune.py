@@ -50,17 +50,12 @@ def _referenced(recs: list[dict]) -> set[str]:
     live explanation for anything and become history the ledger already tells."""
     landed_features = {(r.get("goal_id"), r.get("feature_id")) for r in recs
                        if r["kind"] == "feature.landed"}
-    open_escalations: set[str] = set()
-    resolved: set[tuple] = set()
-    for r in recs:
-        if r["kind"] == "escalation.resolved":
-            resolved.add((r.get("goal_id"), r.get("feature_id")))
+    still_open = {ep for g in {r.get("goal_id") for r in recs}
+                  for e in ledger.open_escalations(recs, g) for ep in e["episode_ids"]}
 
     keep: set[str] = set()
     for r in recs:
         if r["kind"] == "escalation.raised":
-            if (r.get("goal_id"), r.get("feature_id")) not in resolved:
-                open_escalations.update(r.get("episode_ids") or [])
             # a resolved hold still owes a landing: run lands this exact diff
             if (r.get("reason_class") == "held_for_review"
                     and (r.get("goal_id"), r.get("feature_id")) not in landed_features):
@@ -68,7 +63,7 @@ def _referenced(recs: list[dict]) -> set[str]:
         elif r["kind"] == "feature.failed" and r.get("episode_id"):
             if (r.get("goal_id"), r.get("feature_id")) not in landed_features:
                 keep.add(r["episode_id"])
-    return keep | open_escalations
+    return keep | still_open
 
 
 def plan_prune(root: str | Path = ".", days: float = 14,

@@ -11,7 +11,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from .diagnose import phase_counts
-from .ledger import read
+from .ledger import open_escalations, read
 from . import vascular_state
 
 
@@ -107,12 +107,12 @@ def status(root: str = ".", stale_minutes: float = 30) -> tuple[list[str], int]:
                             if r["kind"] == "goal.finished"), None)
             lines.append(f"DONE     {goal_id}" + (f": {outcome}" if outcome else ""))
             continue
-        open_esc = kinds.count("escalation.raised") - kinds.count("escalation.resolved")
-        if open_esc > 0:
-            last = [r for r in rs if r["kind"] == "escalation.raised"][-1]
-            line = (f"BLOCKED  {goal_id}: {open_esc} escalation(s) open, latest "
-                    f"{last.get('feature_id', '?')} — {last.get('reason', 'no reason recorded')}")
-            if last.get("episode_ids"):
+        blocked = open_escalations(rs, goal_id)
+        if blocked:
+            last = blocked[-1]
+            line = (f"BLOCKED  {goal_id}: {sum(e['count'] for e in blocked)} escalation(s) "
+                    f"open, latest {last['feature_id']} — {last['reason'] or 'no reason recorded'}")
+            if last["episode_ids"]:
                 line += f"  drill down: pulse episode {last['episode_ids'][-1]}"
             lines.append(line)
             code = max(code, 1)
