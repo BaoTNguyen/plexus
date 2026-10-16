@@ -14,6 +14,12 @@ def repo_dir(root: str | Path, component: str) -> Path:
     return vascular_paths.repo_dir(root, component)
 
 
+def arteries_wired(root: str | Path) -> bool:
+    """`arteries setup` ran here. Only setup writes config.json; the hooks used
+    to create the bare folder anywhere they fired, so the folder proves nothing."""
+    return (repo_dir(root, "arteries") / "config.json").is_file()
+
+
 def plexus_dir(root: str | Path) -> Path:
     return repo_dir(root, "plexus")
 

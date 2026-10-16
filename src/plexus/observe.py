@@ -85,7 +85,7 @@ def _silent_layers(recs: list[dict], root: str, sample: int = 10) -> str | None:
     # silence has two causes with opposite fixes, and telling them apart matters:
     # an unwired repo needs installing, a wired one that went quiet is usually
     # Postgres being unreachable (capillaries retrieval cannot run without it).
-    if not vascular_state.repo_dir(root, "arteries").is_dir():
+    if not vascular_state.arteries_wired(root):
         return line + f"repo not wired; run `arteries setup claude --cwd {root}`"
     return line + "repo is wired, so check `plexus stack` for degraded writes"
 

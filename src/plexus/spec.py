@@ -182,7 +182,7 @@ def install_integration(root: str | Path = ".") -> str:
     green, which is why this has to happen at init rather than be noticed later.
     Best effort: arteries may not be installed, and a goal repo without it works.
     """
-    if vascular_state.repo_dir(root, "arteries").is_dir():
+    if vascular_state.arteries_wired(root):
         return "arteries: already wired"
     try:
         r = subprocess.run(
