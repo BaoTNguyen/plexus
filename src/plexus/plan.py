@@ -46,7 +46,7 @@ Reply with ONLY a JSON array of features, in build order. Each feature:
   "contract": ["<public symbol this feature adds or changes>", ...],
   "priority": 0,
   "depends_on": ["<feature id>", ...],
-  "needs_upstream": ["<symbol from another project>", ...],
+  "needs_upstream": ["<module.path> or <module.path:Symbol>", ...],
   "skills": ["<capability>", ...],
   "difficulty": "easy|medium|hard",
   "effort": "low|medium|high",
@@ -64,7 +64,9 @@ must print. The run executes it and refuses the feature if any of those lines is
 missing from the output, so write the mockup you actually want to see.
 `priority` is an integer where 0 is highest. `depends_on` names features in this
 plan; dependencies always run first, with priority breaking ties between ready
-features. Use `needs_upstream` only for public symbols from another project.
+features. Use `needs_upstream` only for public symbols from another project,
+written exactly `module.path` or `module.path:Symbol` (no call signature): the
+run imports the module and checks the attribute exists.
 Keep each feature small enough to land in one agent session.
 `acceptance` runs from the repository root, which is not always the same
 directory: use paths relative to it, and never cd into an absolute path such as
@@ -402,6 +404,18 @@ def criterion_problems(command: str) -> list[str]:
     return problems
 
 
+_UPSTREAM = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*(:[A-Za-z_]\w*)?")
+
+
+def upstream_problems(needs: list[str]) -> list[str]:
+    """`needs_upstream` entries the run's import check can never satisfy. A
+    planner once wrote a call signature there (F89); importing that always
+    fails, so the feature escalated upstream_not_ready forever and seeded a
+    junk goal upstream."""
+    return [f"needs_upstream {n!r} is not `module.path` or `module.path:Symbol`"
+            for n in needs if not _UPSTREAM.fullmatch(n)]
+
+
 def check_criteria(spec, root: str | Path = ".", task_id: str = "") -> list[tuple[str, str]]:
     """Every acceptance command must FAIL on the base commit. A criterion that
     already passes is vacuous (`true`, `echo ok`) or describes work already done,
@@ -438,7 +452,8 @@ def check_criteria(spec, root: str | Path = ".", task_id: str = "") -> list[tupl
 
 def amend(spec, feature_id: str, root: str | Path = ".",
           acceptance: str | None = None, spec_text: str | None = None,
-          title: str | None = None, touches: list[str] | None = None) -> str:
+          title: str | None = None, touches: list[str] | None = None,
+          needs_upstream: list[str] | None = None) -> str:
     """Fix one not-yet-landed feature's plan in place.
 
     The plan is otherwise immutable once armed, so a criterion discovered wrong
@@ -471,9 +486,12 @@ def amend(spec, feature_id: str, root: str | Path = ".",
         # the resolution path for a scope_violation escalation where the plan,
         # not the agent, was wrong about how wide the feature really is
         changes["touches"] = touches
+    if needs_upstream is not None:
+        changes["needs_upstream"] = needs_upstream
     if not changes:
         raise SystemExit(
-            "nothing to amend — pass --acceptance / --spec / --title / --touches")
+            "nothing to amend — pass --acceptance / --spec / --title / --touches"
+            " / --needs-upstream")
     feat.update(changes)
 
     with open(plan_path(root, task_id), "w", encoding="utf-8") as f:
@@ -490,12 +508,15 @@ def approve(spec, root: str | Path = ".", approver: str = "human",
     plan_id = plan[0]["plan_id"]
     # not waivable: unlike a criterion that passes on base (sometimes the work
     # really is done), these are wrong whatever the repo looks like
-    broken = [(f["id"], why) for f in plan for why in criterion_problems(f["acceptance"])]
+    broken = [(f["id"], why) for f in plan
+              for why in criterion_problems(f["acceptance"])
+              + upstream_problems(f.get("needs_upstream") or [])]
     if broken:
         raise SystemExit(
-            "plan not approved — these acceptance criteria are broken as written:\n"
+            "plan not approved — these plan fields are broken as written:\n"
             + "\n".join(f"  {fid}: {why}" for fid, why in broken)
-            + "\nFix them with `plexus amend <feature> --acceptance '...'`.")
+            + "\nFix them with `plexus amend <feature> --acceptance '...'`"
+            " or `--needs-upstream 'mod:Sym,...'`.")
     bad = check_criteria(spec, root, task_id)
     if bad and not waive:
         raise SystemExit(

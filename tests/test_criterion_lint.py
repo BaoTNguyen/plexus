@@ -49,3 +49,16 @@ def test_approve_refuses_a_broken_criterion_even_when_waived(tmp_path):
                     agent_cmd=None, timeout=30, spec_hash="h")
     with pytest.raises(SystemExit, match="f1: names /work"):
         approve(spec, tmp_path, waive=True)
+
+
+def test_approve_refuses_a_signature_in_needs_upstream(tmp_path):
+    plan = vascular_state.plexus_dir(tmp_path) / "plan.jsonl"
+    plan.parent.mkdir(parents=True)
+    plan.write_text(json.dumps({"plan_id": "p1", "task_id": "", "id": "f1",
+                                "acceptance": "pytest -q",
+                                "needs_upstream": ["heart.events.emit(source, kind)"]}) + "\n")
+    spec = GoalSpec(goal_id="g", text="t", context="", suite="true",
+                    attempts_per_feature=1, episodes_per_goal=5, agent="claude",
+                    agent_cmd=None, timeout=30, spec_hash="h")
+    with pytest.raises(SystemExit, match="f1: needs_upstream"):
+        approve(spec, tmp_path, waive=True)

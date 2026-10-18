@@ -46,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--title", default=None, help="new title")
     s.add_argument("--touches", default=None,
                    help="new path allowlist, comma-separated globs")
+    s.add_argument("--needs-upstream", default=None,
+                   help="new upstream symbols, comma-separated module.path[:Symbol]; '' for none")
 
     s = sub.add_parser("review", help="plan-vs-landed conformance: which commits you must read")
     s.add_argument("--root", default=".")
@@ -169,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {path} — edit it, then `plexus plan`")
         return 0
     if args.cmd == "plan":
-        from .plan import criterion_problems, make_plan
+        from .plan import criterion_problems, make_plan, upstream_problems
         from .spec import load_spec
         from .review import classify
         feats = make_plan(load_spec(args.root), args.root, task_id=args.task)
@@ -181,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  [{classify(f)}] {f['id']}: {f['title']}")
             for why in criterion_problems(f["acceptance"]):
                 print(f"      acceptance {why} -- amend before approving")
+            for why in upstream_problems(f.get("needs_upstream") or []):
+                print(f"      {why} -- amend before approving")
         return 0
     if args.cmd == "approve":
         from .plan import approve
@@ -214,9 +218,11 @@ def main(argv: list[str] | None = None) -> int:
         from .spec import load_spec
         touches = ([t.strip() for t in args.touches.split(",") if t.strip()]
                    if args.touches is not None else None)
+        needs = ([n.strip() for n in args.needs_upstream.split(",") if n.strip()]
+                 if args.needs_upstream is not None else None)
         print(amend(load_spec(args.root), args.feature, args.root,
                     acceptance=args.acceptance, spec_text=args.spec_text,
-                    title=args.title, touches=touches))
+                    title=args.title, touches=touches, needs_upstream=needs))
         return 0
     if args.cmd == "review":
         from . import review
