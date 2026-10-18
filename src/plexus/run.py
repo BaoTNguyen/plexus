@@ -39,7 +39,7 @@ from . import vascular_state
 from .plan import matches as _matches
 from .plan import execution_order, load_plan, parse_expect
 from .registry import load_registry, seed_upstream
-from .review import classify, cross_repo_callers, diff_paths, exec_surface, report, suspicious
+from .review import classify, cross_repo_callers, diff_paths, exec_surface, report, suspicious, trust_boundary
 
 # heart episode outcomes that are mechanical failures — no valid applied diff to
 # judge a criterion against, so acceptance is skipped and it's a coding failure.
@@ -1046,6 +1046,9 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 callers = cross_repo_callers(repo, base, diff)
                 if cls not in spec.review_hold and callers:
                     cls = "boundary"
+                trust = trust_boundary(diff, spec.review_boundary)
+                if cls not in spec.review_hold and trust:
+                    cls = "boundary"
                 if cls in spec.review_hold:
                     ledger.record(
                         "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
@@ -1058,7 +1061,9 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                                + (f" (new in this diff: {'; '.join(flags[:5])})"
                                   if flags else "")
                                + (f" (called from: {', '.join(callers[:10])})"
-                                  if callers else ""),
+                                  if callers else "")
+                               + (f" (trust boundary: {', '.join(trust)})"
+                                  if trust else ""),
                         # not cost_usd: cost summers read every record, and this
                         # attempt's cost lands on whichever record settles it
                         episode_ids=[ep_id], held_cost=attempt_cost)

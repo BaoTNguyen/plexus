@@ -321,6 +321,48 @@ def diff_paths(repo: str | Path, diff: str, strict: bool = True) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
+def trust_boundary(diff: str, entries: tuple[str, ...]) -> list[str]:
+    """The `[review] boundary` entries a diff touches: `path` globs, or
+    `path::function` for a boundary that lives inside a busier file (heart's
+    `_sandbox_profiles` decides what env reaches a container, in episode.py,
+    which changes all the time). cross_repo_callers only sees names other repos
+    import; what reaches a sandbox is a trust boundary whether or not anyone
+    imports it.
+
+    A function counts as touched when a hunk's header names it (git's
+    enclosing-function context) or a changed line is its `def`.
+    ponytail: git's default funcname heuristic, so a hunk deep in a nested
+    function reports the nearest unindented line above it; a top-level def is
+    what the entries name, and that is what it finds."""
+    if not entries:
+        return []
+    touched: dict[str, set[str]] = {}
+    current = None
+    for line in diff.splitlines():
+        if line.startswith("+++ ") or line.startswith("--- "):
+            target = line[4:].strip()
+            if target.startswith(("a/", "b/")):
+                current = _unquote(target)[2:]
+                touched.setdefault(current, set())
+            continue
+        if current is None:
+            continue
+        if line.startswith("@@"):
+            if m := re.search(r"@@[^@]*@@\s*(?:async\s+)?(?:def|class)\s+(\w+)", line):
+                touched[current].add(m.group(1))
+        elif line[:1] in "+-":
+            if m := re.match(r"[+-]\s*(?:async\s+)?(?:def|class)\s+(\w+)", line):
+                touched[current].add(m.group(1))
+    hits = []
+    for entry in entries:
+        glob, _, symbol = entry.partition("::")
+        for path, names in touched.items():
+            if _matches(path, glob) and (not symbol or symbol in names):
+                hits.append(entry)
+                break
+    return hits
+
+
 def _unquote(path: str) -> str:
     """Undo git's C-quoting of a header path (`"caf\\303\\251.md"`)."""
     if not (path.startswith('"') and path.endswith('"')):
