@@ -10,6 +10,8 @@ import datetime
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from heart.pulse import load_events
+
 from .diagnose import phase_counts
 from .ledger import open_escalations, read
 from . import vascular_state
@@ -44,7 +46,7 @@ def _now() -> datetime.datetime:
 def _last_activity(goal_id: str, goal_records: list[dict]) -> datetime.datetime:
     latest = max(r["ts"] for r in goal_records)
     try:  # the journal adds heart/arteries activity between ledger writes
-        from heart.pulse import load_events  # ponytail: full-journal scan, prune by day file if slow
+        # ponytail: full-journal scan, prune by day file if slow
         for e in load_events():
             if ((e.get("payload") or {}).get("goal_id") == goal_id
                     or str(e.get("task_id", "")).startswith(goal_id + "-")):
@@ -66,8 +68,7 @@ def _silent_layers(recs: list[dict], root: str, sample: int = 10) -> str | None:
     if not eps:
         return None
     recent = set(sorted(eps)[-sample:])
-    try:  # lazy: heart may be absent; the except below is the answer when it is
-        from heart.pulse import load_events
+    try:  # an unreadable journal: the except below is the answer
         events = [e for e in load_events() if e.get("episode_id") in recent]
     except Exception:
         return None  # no journal to judge by; say nothing rather than cry wolf
@@ -237,8 +238,6 @@ def report(roots: list[str | Path]) -> list[str]:
 def stack(hours: float = 24) -> list[str]:
     """Factory-wide rollup of the shared journal by source — event volume,
     failures, store degradation across heart/arteries/capillaries/marrow/plexus."""
-    # lazy: keeps plexus importable without heart; only `stack` reads the journal
-    from heart.pulse import load_events
     # hours 0 means all time; "" sorts below every ISO timestamp
     cutoff = "" if not hours else (_now() - datetime.timedelta(hours=hours)).isoformat()
     events = [e for e in load_events() if e.get("ts", "") >= cutoff]

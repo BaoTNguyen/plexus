@@ -26,12 +26,13 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-from . import ledger
+from heart.runner import model_pricing
+
+from . import ledger, vascular_paths
 from .spec import scaffold_goal
 
 
 def _config_dir() -> Path:
-    from . import vascular_paths
     return vascular_paths.path("config", "plexus")
 
 
@@ -209,7 +210,6 @@ def seat_secrets() -> Path:
     Mounted read-only into the proxy and nowhere else. heart computes the
     same directory, because heart's proxy reads the sentinel seed plexus
     writes: <VASCULAR_HOME or ~/.vascular>/secrets/heart."""
-    from . import vascular_paths
     return vascular_paths.path("secrets", "heart")
 
 
@@ -397,8 +397,7 @@ def heart_model_rates() -> dict[str, dict[str, float]]:
     import makes: two rate cards in two repos drift silently, and a wrong cost
     is still a plausible number, so nothing ever alerts.
     """
-    try:  # lazy: heart may be absent; an empty card is the documented fallback
-        from heart.runner import model_pricing
+    try:  # an empty card is the documented fallback
         return model_pricing()
     except Exception:
         return {}

@@ -37,6 +37,8 @@ from pathlib import Path
 from queue import Empty
 from urllib.parse import parse_qs, urlparse
 
+import heart.events as he
+from heart.pulse import load_events
 from heart.runner import CACHE_MULTIPLIERS, speed_multiplier
 
 from . import diagnose, ledger, observe, overview, registry, review, tasks, term, translog
@@ -564,10 +566,6 @@ def _live(root: Path, limit: int = 60) -> list[dict]:
     that the ledger (coarse, durable) deliberately doesn't carry.
     ponytail: full-journal scan per poll; prune by day-file if it ever drags."""
     goal_id = _goal_id(root)
-    try:  # lazy: heart may be absent; an empty live view is the fallback
-        from heart.pulse import load_events
-    except Exception:
-        return []
     pref = goal_id + "-"
     out = []
     for e in load_events():
@@ -588,10 +586,6 @@ def _live(root: Path, limit: int = 60) -> list[dict]:
 def _spine_events(root: Path) -> list[dict]:
     """Raw spine events belonging to one goal, oldest first."""
     goal_id = _goal_id(root)
-    try:  # lazy: heart may be absent; an empty list is the fallback
-        from heart.pulse import load_events
-    except Exception:
-        return []
     pref = goal_id + "-"
     return [e for e in load_events()
             if str(e.get("task_id") or "").startswith(pref)
@@ -802,8 +796,7 @@ def _fleet_telemetry(roots: list[Path], cutoff: str, cutoff_7d: str,
     # keep whichever reaches further back: the selected window may be a year,
     # and the 7-day figures still have to come out of the same list
     retain_cutoff = min(cutoff, cutoff_7d)
-    try:  # lazy: heart may be absent; accounting degrades rather than fails
-        from heart.pulse import load_events
+    try:  # an unreadable journal degrades accounting rather than failing it
         history = load_events()
         retained = [event for event in history
                     if event.get("ts", "") >= retain_cutoff]
@@ -2204,8 +2197,7 @@ def demo() -> None:
 
         # live view: spine events filtered to this goal's lineage, both paths
         # (task_id prefix and payload.goal_id), isolated journal
-        # lazy: the self-check emits into an isolated journal; heart only here
-        import heart.events as he
+        # the self-check emits into an isolated journal
         old_sp = os.environ.get("EVENT_JOURNAL_DIR")
         os.environ["EVENT_JOURNAL_DIR"] = str(root / "livejournal")
         try:

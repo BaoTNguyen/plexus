@@ -5,6 +5,8 @@ docker and openssl are stubbed throughout -- no real container, no network.
 """
 import pytest
 
+from plexus import sandbox
+
 
 @pytest.fixture(autouse=True)
 def _no_heart_image_check(monkeypatch):
@@ -34,8 +36,6 @@ def _stub_docker(monkeypatch, sandbox, responses):
 def test_ensure_with_no_ca_does_not_provision_tls(monkeypatch, tmp_path):
     """A ChatGPT seat with no CA yet is exactly the case doctor --fix would
     provision for. ensure() must only report it."""
-    from plexus import sandbox
-
     provisioned = []
     monkeypatch.setattr("plexus.tls.provision", lambda: provisioned.append(True), raising=False)
     monkeypatch.setattr("plexus.registry.injected_seats", lambda: {"chatgpt"})
@@ -57,8 +57,6 @@ def test_ensure_does_not_restart_a_running_proxy_with_different_settings(monkeyp
     """A running proxy whose INJECT_TLS_PORT disagrees with what's wanted is
     reported, not restarted -- a wave in flight needs the proxy it already
     dialed through to keep answering."""
-    from plexus import sandbox
-
     monkeypatch.setattr("plexus.registry.injected_seats", lambda: set())
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])
     monkeypatch.setattr(sandbox, "_running_config", lambda _p, running_only=True: {
@@ -77,8 +75,6 @@ def test_ensure_does_not_restart_a_running_proxy_with_different_settings(monkeyp
 def test_ensure_restarts_a_stopped_proxy_with_its_running_equivalent_settings(monkeypatch):
     """A stopped proxy is restarted by reusing its own container -- `docker
     start`, never `docker run` with newly-computed settings."""
-    from plexus import sandbox
-
     monkeypatch.setattr("plexus.registry.injected_seats", lambda: set())
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])
     stopped = {"ALLOW": "", "DENY": "", "INJECT_PORT": "", "INJECT_TLS_PORT": "",
@@ -97,8 +93,6 @@ def test_ensure_stops_when_a_stopped_proxy_cannot_be_restarted(monkeypatch):
     """No running proxy and nothing to restart it with (its secrets are
     missing, or it was never created) is the unworkable case: ensure() must
     stop, not continue as if the sandbox were ready."""
-    from plexus import sandbox
-
     monkeypatch.setattr("plexus.registry.injected_seats", lambda: set())
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])
     monkeypatch.setattr(sandbox, "_running_config", lambda _p, running_only=True: None)
@@ -112,16 +106,12 @@ def test_ensure_stops_when_a_stopped_proxy_cannot_be_restarted(monkeypatch):
 
 
 def test_ensure_stops_when_docker_is_unavailable(monkeypatch):
-    from plexus import sandbox
-
     monkeypatch.setattr(sandbox.shutil, "which", lambda _n: None)
     with pytest.raises(sandbox.SandboxNotReady):
         sandbox.ensure()
 
 
 def test_ensure_stops_when_network_repair_fails(monkeypatch):
-    from plexus import sandbox
-
     monkeypatch.setattr("plexus.registry.injected_seats", lambda: set())
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])
     _stub_docker(monkeypatch, sandbox, {
@@ -134,8 +124,6 @@ def test_ensure_stops_when_network_repair_fails(monkeypatch):
 
 
 def test_ensure_attaches_a_running_proxy_after_creating_a_missing_network(monkeypatch):
-    from plexus import sandbox
-
     monkeypatch.setattr("plexus.registry.injected_seats", lambda: set())
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])
     monkeypatch.setattr(sandbox, "_running_config", lambda _p, running_only=True: {
@@ -156,8 +144,6 @@ def test_ensure_attaches_a_running_proxy_after_creating_a_missing_network(monkey
 def test_doctor_fix_still_provisions_tls_and_restarts(monkeypatch, tmp_path):
     """doctor(fix=True) keeps its full unattended power -- only ensure() is
     restricted."""
-    from plexus import sandbox
-
     script = tmp_path / "egress-proxy.py"
     script.write_text("# proxy")
     provisioned = []
@@ -182,8 +168,6 @@ def test_ensure_refuses_to_start_a_stopped_proxy_whose_secrets_are_gone(monkeypa
     """The secrets mount is a directory, so `docker start` succeeds over an
     emptied one and the injector then refuses everything. ensure() must check
     the files the stopped container was created to read, and not start it."""
-    from plexus import sandbox
-
     monkeypatch.setattr("plexus.registry.injected_seats", lambda: {"anthropic"})
     monkeypatch.setattr("plexus.registry.seat_secrets", lambda: tmp_path)  # no sentinel
     monkeypatch.setattr(sandbox, "lanes", lambda: [(sandbox.NETWORK, sandbox.PROXY, "", "")])

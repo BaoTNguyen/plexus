@@ -27,11 +27,12 @@ import tomllib
 from pathlib import Path
 
 from heart.detect import detect_verifiers
-from heart.env import Workspace
+from heart.env import Workspace, prune_repo_worktrees
 from heart.episode import DEFAULT_ROLES, best_episode, run_candidates
 from heart.orchestrate import run_orchestrated
 from heart.runner import SANDBOX_MODE, run_contained
 from heart.taskspec import TaskSpec, Verifier
+from heart.verify import run_verifiers
 
 from . import events, ledger, scope
 from . import tasks as _tasks
@@ -715,8 +716,6 @@ def _probe_regression_signal(repo: str, base: str, timeout: int, goal_id: str) -
         if not verifiers:
             marker.write_text("no verifiers\n")
             return
-        # lazy: inside the best-effort probe, so an import failure stays silent
-        from heart.verify import run_verifiers
         runs = []
         for _ in range(2):
             ws = Workspace(repo, base)
@@ -802,8 +801,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
     board_task = task_id
     # reclaim any worktrees a previously killed run leaked (safe now: the lock we
     # just took means no live episode for this repo exists)
-    try:  # lazy: reclaiming leaked worktrees is best-effort, import included
-        from heart.env import prune_repo_worktrees
+    try:  # reclaiming leaked worktrees is best-effort
         prune_repo_worktrees(repo)
     except Exception:
         pass

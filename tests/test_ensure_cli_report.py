@@ -4,6 +4,8 @@ change from ensure() prints as a `sandbox: ` line telling the operator to run
 ensure() finds no workable state at all. docker is stubbed throughout --
 real credential/TLS/proxy-setting inputs are faked, never a container.
 """
+import time
+
 import pytest
 
 from plexus import cli, registry, run as run_mod, sandbox, spec
@@ -94,8 +96,6 @@ def test_run_reports_a_skipped_proxy_setting_change(monkeypatch, tmp_path, capsy
 def test_run_reports_a_skipped_tls_change(monkeypatch, tmp_path, capsys):
     """A ChatGPT seat injected with no CA/cert material yet is exactly what
     doctor --fix would provision -- ensure() must only report it."""
-    import time
-
     monkeypatch.setattr(registry, "injected_seats", lambda: {"chatgpt"})
     monkeypatch.setattr(registry, "detect_subscriptions", lambda: {})
     monkeypatch.setattr(registry, "codex_claims", lambda: {"exp": time.time() + 999999})

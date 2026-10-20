@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import datetime
 import re
+import tempfile
 from pathlib import Path
 
 #: the header `script` writes, which carries the width the run was recorded at
@@ -213,8 +214,6 @@ def _apply(screen: _Screen, params: bytes, final: bytes) -> None:
 def demo() -> None:
     """Self-check: a repaint must not become two lines, and a carriage return
     must overwrite rather than splice."""
-    import tempfile
-
     with tempfile.TemporaryDirectory() as tmp:
         log = Path(tmp) / "t.log"
         log.write_bytes(

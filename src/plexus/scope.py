@@ -20,6 +20,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from heart.pulse import load_events
+
 from .ledger import read, record
 
 #: journal events that say something about scope, and what each one means
@@ -51,11 +53,10 @@ def observe(task_id: str, *, goal_id: str, feature_id: str | None = None,
     """Distil one episode's scope events into the ledger. Returns what it found.
 
     Call this while the episode's events are still in the journal -- directly
-    after the run, not on a later query. Best-effort: heart may be absent, or
-    the journal may have rotated, and neither should fail a goal.
+    after the run, not on a later query. Best-effort: the journal may have rotated,
+    and that should not fail a goal.
     """
-    try:  # lazy: heart may be absent, as this function's docstring states
-        from heart.pulse import load_events
+    try:
         events = load_events(task=task_id)
     except Exception:
         return None  # no journal to read; the ledger keeps what it already had

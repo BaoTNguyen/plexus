@@ -47,20 +47,18 @@ def test_provision_renews_expiring_proxy_cert_without_touching_ca(tmp_path):
     ca_before = (tmp_path / "ca.pem").read_bytes()
 
     # Force the proxy cert to look expired without regenerating the CA.
-    import plexus.tls as tls_mod
-
-    real_days_left = tls_mod._days_left
+    real_days_left = tls._days_left
 
     def fake_days_left(cert):
         if cert.name == "proxy.pem":
             return 1.0
         return real_days_left(cert)
 
-    tls_mod._days_left = fake_days_left
+    tls._days_left = fake_days_left
     try:
         tls.provision(tmp_path)
     finally:
-        tls_mod._days_left = real_days_left
+        tls._days_left = real_days_left
 
     assert (tmp_path / "ca.pem").read_bytes() == ca_before
     assert "tls proxy: ok" in tls.status(tmp_path)[1]
