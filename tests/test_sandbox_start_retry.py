@@ -333,7 +333,6 @@ def test_orchestrated_style_episode_with_a_limit_line_does_not_raise_seat_exhaus
 def test_seat_check_ignores_non_seat_roles_and_quoted_messages(tmp_path):
     """A test role (api:local) whose log quotes a limit message, and a seat
     role that merely mentions one mid-log, are not a spent seat."""
-    from plexus import run
     ep_id = "ep1"
     out = tmp_path / ep_id
     out.mkdir()
@@ -343,6 +342,6 @@ def test_seat_check_ignores_non_seat_roles_and_quoted_messages(tmp_path):
     ep = {"episode_id": ep_id, "roles": [
         {"role": "test", "agent": "api:local"},
         {"role": "implement", "agent": "claude:opus55"}]}
-    assert run._check_seat_exhausted(ep, tmp_path, "g", "f", 1, tmp_path) is False
+    assert run_mod._check_seat_exhausted(ep, tmp_path, "g", "f", 1, tmp_path) is False
     (out / "implement.log").write_text("work\n" * 40 + limit + "\n")
-    assert run._check_seat_exhausted(ep, tmp_path, "g", "f", 1, tmp_path) is True
+    assert run_mod._check_seat_exhausted(ep, tmp_path, "g", "f", 1, tmp_path) is True

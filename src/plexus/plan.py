@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 
 from heart.env import Workspace
+from heart.routing import resolve
 from heart.runner import SANDBOX_MODE, run_agent, run_contained, turn_profile
 from heart.sandbox import CONTEXT, HOME, JOURNAL, WORK
 from heart.taskspec import TaskSpec
@@ -280,7 +281,6 @@ def make_plan(spec, root: str | Path = ".", task_id: str = "") -> list[dict]:
     # tier rather than running the heuristic over its own prompt.
     agent = spec.agent
     if agent == "auto":
-        from heart.routing import resolve
         agent = resolve("frontier", default="claude")
     try:
         for i in range(attempts):

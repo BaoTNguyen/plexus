@@ -1,10 +1,13 @@
 import hashlib
 import json
+import os
 import re
+import subprocess
 
 import pytest
 
-from plexus import events, ledger
+from plexus import events, ledger, run as run_mod, vascular_state
+from plexus.spec import GoalSpec
 
 HEX = re.compile(r"^[0-9a-f]+$")
 SPAN_KEYS = ("span_id", "trace_id", "parent_span_id")
@@ -64,12 +67,6 @@ def test_ledger_record_forwards_span(tmp_path):
 
 
 # --- run() threads the plan's trace and each attempt's span ---------------
-
-import os  # noqa: E402
-import subprocess  # noqa: E402
-
-from plexus import run as run_mod, vascular_state  # noqa: E402
-from plexus.spec import GoalSpec  # noqa: E402
 
 PLAN_ID = "p1"
 FID = "f1"
