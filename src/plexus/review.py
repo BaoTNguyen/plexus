@@ -225,7 +225,10 @@ def _declared(feat: dict) -> set[str]:
     return out
 
 
-def rows(spec, root: str | Path = ".", repo: str | Path | None = None) -> list[dict]:
+def rows(spec, root: str | Path = ".", repo: str | Path | None = None,
+         commits: set[str] | None = None) -> list[dict]:
+    """One row per landed feature of the goal; only those whose commit is in
+    `commits` when given (a PR reads what it carries, not the goal's history)."""
     repo = repo or root
     # every task's plan plus the pre-task one: a repo with tasks has no
     # plan.jsonl, and load_plan(root) raising SystemExit here killed the run
@@ -236,6 +239,8 @@ def rows(spec, root: str | Path = ".", repo: str | Path | None = None) -> list[d
     out: list[dict] = []
     for r in ledger.read(root):
         if r["kind"] != "feature.landed" or r.get("goal_id") != spec.goal_id:
+            continue
+        if commits is not None and r.get("commit") not in commits:
             continue
         feat = plan.get(r["feature_id"], {})
         commit = r.get("commit", "")
@@ -267,8 +272,9 @@ def _stray(paths: list[str], feat: dict) -> list[str]:
     return sorted(p for p in paths if not any(_matches(p, g) for g in touches))
 
 
-def report(spec, root: str | Path = ".", repo: str | Path | None = None) -> str:
-    data = rows(spec, root, repo)
+def report(spec, root: str | Path = ".", repo: str | Path | None = None,
+           commits: set[str] | None = None) -> str:
+    data = rows(spec, root, repo, commits)
     if not data:
         return "nothing landed yet for this goal"
     lines = []
@@ -276,8 +282,8 @@ def report(spec, root: str | Path = ".", repo: str | Path | None = None) -> str:
         paths = "ok" if not d["stray_paths"] else f"+{len(d['stray_paths'])} stray"
         syms = ", ".join(["+" + s for s in d["unplanned_symbols"]]
                          + ["-" + s for s in d["removed_symbols"]]) or "ok"
-        lines.append(f"{d['class']:<11}{d['feature_id']:<22}{d['commit'][:7]:<9}"
-                     f"paths {paths:<12}symbols {syms:<28}{d['verdict']}")
+        lines.append(f"{d['class']:<11}{d['feature_id']:<22} {d['commit'][:7]:<8}"
+                     f"paths {paths:<12}symbols {syms:<28} {d['verdict']}")
     need = sum(1 for d in data if d["verdict"] != "ok")
     lines.append(f"\n{need} of {len(data)} landed features need your eyes.")
     for d in data:
