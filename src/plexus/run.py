@@ -351,7 +351,8 @@ SEAT_TAIL_LINES = 15
 
 
 def _check_seat_exhausted(ep: dict, runs_dir: Path, goal_id: str,
-                          feature_id: str, attempt: int, root: Path) -> bool:
+                          feature_id: str, attempt: int, root: Path,
+                          span: dict | None = None) -> bool:
     """Scan every role's log of a normal-build episode for a seat-exhaustion
     signal. On a match, record `seat.exhausted` (excluded from attempt
     counting, see `_feature_state`) and `escalation.raised` with
@@ -384,7 +385,7 @@ def _check_seat_exhausted(ep: dict, runs_dir: Path, goal_id: str,
             "escalation.raised", goal_id=goal_id, feature_id=feature_id,
             root=root, reason_class="seat_exhausted",
             reason=f"seat '{seat}' hit its usage limit, resets {reset}",
-            episode_ids=[ep["episode_id"]])
+            episode_ids=[ep["episode_id"]], **(span or {}))
         return True
     return False
 
@@ -507,7 +508,7 @@ def _resolved_hold(recs: list[dict], goal_id: str, feature_id: str) -> str:
 
 
 def _land_held(spec, feat: dict, root: Path, runs_dir, ep_id: str,
-               attempt: int) -> bool:
+               attempt: int, plan_id: str) -> bool:
     """Land the diff a resolved hold signed off. No episode is built: what
     lands is what was read. If the diff is gone, no longer applies, or its
     acceptance now fails on the current base, hold again with the reason --
@@ -531,18 +532,20 @@ def _land_held(spec, feat: dict, root: Path, runs_dir, ep_id: str,
         elif stray:
             why = "it touches paths the plan does not authorise: " + ", ".join(stray[:10])
     task_id = events.make_task_id(spec.goal_id, feat["id"], attempt)
+    span = {"span_id": events.attempt_span(plan_id, feat["id"], attempt),
+            "trace_id": events.trace_for(plan_id)}
     if why:
         ledger.record("escalation.raised", goal_id=spec.goal_id, feature_id=feat["id"],
                       root=root, reason_class="held_stale",
                       reason=f"the signed-off diff from {ep_id} can't land: {why} "
                              f"-- resolve to rebuild the feature (the rebuild is held "
                              f"for sign-off again)",
-                      episode_ids=[ep_id], **cost)
+                      episode_ids=[ep_id], **cost, **span)
         return False
     commit = _land(repo, diff, feat["id"])
     ledger.record("feature.landed", goal_id=spec.goal_id, feature_id=feat["id"],
                   root=root, attempt=attempt, task_id=task_id, episode_id=ep_id,
-                  commit=commit, from_held=ep_id, **cost)
+                  commit=commit, from_held=ep_id, **cost, **span)
     print(f"landed {feat['id']} from signed-off episode {ep_id}")
     return True
 
@@ -807,6 +810,25 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
     plan = load_plan(root, task_id)
     recs = ledger.read(root)
     plan_id = str(plan[0].get("plan_id", "")) if plan else ""
+    # every episode this plan dispatches joins one trace (plexus runs serially)
+    prev_trace = os.environ.get("PULSE_TRACE_ID")
+    os.environ["PULSE_TRACE_ID"] = events.trace_for(plan_id)
+    try:
+        return _walk_plan(spec, root, runs_dir, candidates, task_id, repo,
+                          board_task, plan, recs, plan_id)
+    finally:
+        _restore_env("PULSE_TRACE_ID", prev_trace)
+
+
+def _restore_env(name: str, prev: str | None) -> None:
+    if prev is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = prev
+
+
+def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
+               repo: str, board_task: str, plan, recs, plan_id: str) -> int:
     if not any(r.get("kind") == "plan.approved"
                and r.get("goal_id") == spec.goal_id
                and r.get("plan_id") == plan_id for r in recs):
@@ -866,7 +888,8 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
 
         held_ep = _resolved_hold(recs, spec.goal_id, fid)
         if held_ep:
-            if not _land_held(spec, feat, root, runs_dir, held_ep, next_attempt - 1):
+            if not _land_held(spec, feat, root, runs_dir, held_ep, next_attempt - 1,
+                              plan_id):
                 return 1
             continue
 
@@ -877,11 +900,14 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
         last_episode_ids: list[str] = []
         attempt = next_attempt
         budget = spec.attempts_per_feature - budget_used
+        span: dict[str, str] = {}
         for i in range(budget):
             task_id = events.make_task_id(spec.goal_id, fid, attempt)
+            span = {"span_id": events.attempt_span(plan_id, fid, attempt),
+                    "trace_id": events.trace_for(plan_id)}
             ledger.record("feature.started", goal_id=spec.goal_id, feature_id=fid,
                           root=root, attempt=attempt, task_id=task_id,
-                          retry_context=retry_context)
+                          retry_context=retry_context, **span)
             base = _head(repo)
             task = TaskSpec(
                 task_id=task_id, repo_path=repo, base_commit=base,
@@ -904,6 +930,8 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
             # process-global env is safe here)
             os.environ["PLEXUS_GOAL_ID"] = spec.goal_id
             os.environ["PLEXUS_FEATURE_ID"] = fid
+            prev_parent = os.environ.get("PULSE_PARENT_SPAN")
+            os.environ["PULSE_PARENT_SPAN"] = span["span_id"]
             try:
                 # retrieval is left on: a feature prompt is fully specified and
                 # long, so capillaries' gate skips it on its own (out of the
@@ -924,11 +952,12 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                     root=root, reason_class="sandbox_unavailable",
                     reason=f"sandbox failed to start 3 times in a row: "
                            f"{exc.last_error}",
-                    episode_ids=last_episode_ids)
+                    episode_ids=last_episode_ids, **span)
                 return 1
             finally:
                 os.environ.pop("PLEXUS_GOAL_ID", None)
                 os.environ.pop("PLEXUS_FEATURE_ID", None)
+                _restore_env("PULSE_PARENT_SPAN", prev_parent)
             ep_id = ep["episode_id"]
             last_episode_ids.append(ep_id)
             ep_outcome = ep["outcome"]
@@ -942,7 +971,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
             # this one's, and a candidate with no roles has no log to read.
             if not spec.orchestrate and any(
                     _check_seat_exhausted(c, root / runs_dir, spec.goal_id,
-                                         fid, attempt, root)
+                                         fid, attempt, root, span)
                     for c in cands if c.get("roles")):
                 return 1
 
@@ -965,12 +994,12 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                         root=root, reason_class="attempts_exhausted",
                         reason=f"still blocked after {_BLOCKS_PER_FEATURE} answered "
                                f"decisions — the goal is likely underspecified: {question}",
-                        episode_ids=last_episode_ids)
+                        episode_ids=last_episode_ids, **span)
                 else:
                     ledger.record(
                         "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
                         root=root, reason_class="blocked_on_decision",
-                        reason=question, episode_ids=[ep_id])
+                        reason=question, episode_ids=[ep_id], **span)
                 return 1  # a human (later, the router) owes an answer before we go on
 
             # mechanical failure: no valid applied diff to judge — a coding failure,
@@ -983,7 +1012,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                               episode_id=ep_id,
                               failure_class=_MECHANICAL.get(ep_outcome, "episode_error"),
                               episode_outcome=ep_outcome, acceptance_passed=None,
-                              reason=f"outcome={ep_outcome}", **attempt_cost)
+                              reason=f"outcome={ep_outcome}", **attempt_cost, **span)
                 retry_context = {**retry_context, "failure_tail": _verifier_tail(ep)}
                 attempt += 1
                 continue
@@ -1026,7 +1055,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                         "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
                         root=root, reason_class="held_for_review",
                         reason=f"acceptance passed but the review did not run: {review_note}",
-                        episode_ids=[ep_id], held_cost=attempt_cost)
+                        episode_ids=[ep_id], held_cost=attempt_cost, **span)
                     return 1
                 # Software-factory boundary: a green feature whose risk class is
                 # on the goal's review-hold list waits for a human sign-off
@@ -1066,7 +1095,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                                   if trust else ""),
                         # not cost_usd: cost summers read every record, and this
                         # attempt's cost lands on whichever record settles it
-                        episode_ids=[ep_id], held_cost=attempt_cost)
+                        episode_ids=[ep_id], held_cost=attempt_cost, **span)
                     return 1
                 # Scope gate, last thing before the commit exists. Not a retry:
                 # the agent and the plan disagree about how wide the feature is,
@@ -1079,12 +1108,12 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                         reason="diff touched paths the plan did not authorise: "
                                + ", ".join(sorted(stray)[:10])
                                + f" (allowed: {', '.join(feat['touches'])})",
-                        episode_ids=[ep_id])
+                        episode_ids=[ep_id], **span)
                     return 1
                 commit = _land(repo, diff, fid)
                 ledger.record("feature.landed", goal_id=spec.goal_id, feature_id=fid,
                               root=root, attempt=attempt, task_id=task_id,
-                              episode_id=ep_id, commit=commit, **attempt_cost)
+                              episode_id=ep_id, commit=commit, **attempt_cost, **span)
                 # an approve verdict still carries findings -- a blocker never
                 # ships, but a concern the reviewer judged "not fatal" lands
                 # anyway, so record it instead of letting the verdict word
@@ -1124,7 +1153,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                                   if acc_stage == "expect" else
                                   f"acceptance={'pass' if acc_passed else 'fail'}")
                                  + f" regression={'FAIL' if ep_outcome == 'fail' else 'ok'}",
-                          **attempt_cost)
+                          **attempt_cost, **span)
             if review == "reject":
                 findings = [
                     {"severity": f.get("severity"), "file": f.get("file"),
@@ -1141,7 +1170,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                           root=root, reason_class="attempts_exhausted",
                           reason=f"{spec.attempts_per_feature} attempts failed "
                                  f"acceptance: {feat['acceptance']}",
-                          episode_ids=last_episode_ids)
+                          episode_ids=last_episode_ids, **span)
             return 1
 
     # scope gate: the full ground-truth suite on the built-up tree
