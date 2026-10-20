@@ -46,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--title", default=None, help="new title")
     s.add_argument("--touches", default=None,
                    help="new path allowlist, comma-separated globs")
+    s.add_argument("--needs-upstream", default=None,
+                   help="new upstream symbols, comma-separated module.path[:Symbol]; '' for none")
 
     s = sub.add_parser("review", help="plan-vs-landed conformance: which commits you must read")
     s.add_argument("--root", default=".")
@@ -69,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
                    help="the decision (injected into the next attempt for a block)")
     s.add_argument("--root", default=".")
 
-    s = sub.add_parser("export", help="labels.jsonl for marrow: acceptance joined to heart reward")
+    s = sub.add_parser("export", help="labels.jsonl for marrow: acceptance joined to heart outcome")
     s.add_argument("--root", default=".")
     s.add_argument("-o", "--out", default=None, help="default .vascular/plexus/labels.jsonl")
 
@@ -169,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"wrote {path} — edit it, then `plexus plan`")
         return 0
     if args.cmd == "plan":
-        from .plan import criterion_problems, make_plan
+        from .plan import criterion_problems, make_plan, upstream_problems
         from .spec import load_spec
         from .review import classify
         feats = make_plan(load_spec(args.root), args.root, task_id=args.task)
@@ -181,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  [{classify(f)}] {f['id']}: {f['title']}")
             for why in criterion_problems(f["acceptance"]):
                 print(f"      acceptance {why} -- amend before approving")
+            for why in upstream_problems(f.get("needs_upstream") or []):
+                print(f"      {why} -- amend before approving")
         return 0
     if args.cmd == "approve":
         from .plan import approve
@@ -214,9 +218,11 @@ def main(argv: list[str] | None = None) -> int:
         from .spec import load_spec
         touches = ([t.strip() for t in args.touches.split(",") if t.strip()]
                    if args.touches is not None else None)
+        needs = ([n.strip() for n in args.needs_upstream.split(",") if n.strip()]
+                 if args.needs_upstream is not None else None)
         print(amend(load_spec(args.root), args.feature, args.root,
                     acceptance=args.acceptance, spec_text=args.spec_text,
-                    title=args.title, touches=touches))
+                    title=args.title, touches=touches, needs_upstream=needs))
         return 0
     if args.cmd == "review":
         from . import review
@@ -239,20 +245,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "resolve":
         from . import ledger
-        from .serve import _open_escalations
         from .spec import load_spec
         goal_id = load_spec(args.root).goal_id
-        # guard against a typo'd feature id silently recording a resolution for a
-        # block that isn't open — which leaves the real escalation in place and
-        # the run still paused (found in the end-to-end shakeout).
-        open_ids = {e["feature_id"] for e in _open_escalations(ledger.read(args.root), goal_id)}
-        if args.feature not in open_ids:
+        # a typo'd feature id must not record a resolution for a block that
+        # isn't open -- the real escalation would stay and the run stay paused
+        open_ids = ledger.resolve(args.root, goal_id, args.feature, args.answer)
+        if open_ids is not None:
             print(f"no open escalation for {args.feature!r} in {goal_id}."
                   + (" Open: " + ", ".join(sorted(open_ids)) if open_ids
                      else " Nothing is blocked."))
             return 1
-        ledger.record("escalation.resolved", goal_id=goal_id, feature_id=args.feature,
-                      root=args.root, resolution=args.answer)
         print(f"resolved {args.feature}; re-run `plexus run` to resume")
         return 0
     if args.cmd == "export":

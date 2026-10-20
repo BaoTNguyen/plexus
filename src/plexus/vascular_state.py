@@ -14,6 +14,12 @@ def repo_dir(root: str | Path, component: str) -> Path:
     return vascular_paths.repo_dir(root, component)
 
 
+def arteries_wired(root: str | Path) -> bool:
+    """`arteries setup` ran here. Only setup writes config.json; the hooks used
+    to create the bare folder anywhere they fired, so the folder proves nothing."""
+    return (repo_dir(root, "arteries") / "config.json").is_file()
+
+
 def plexus_dir(root: str | Path) -> Path:
     return repo_dir(root, "plexus")
 
@@ -38,10 +44,6 @@ def plan_log_path(root: str | Path) -> Path:
     return plexus_dir(root) / "plan.log"
 
 
-def plan_raw_log_path(root: str | Path) -> Path:
-    return plexus_dir(root) / "plan.raw.log"
-
-
 def overview_dir(root: str | Path) -> Path:
     return plexus_dir(root) / "overview"
 
@@ -54,16 +56,8 @@ def transcripts_dir(root: str | Path) -> Path:
     return plexus_dir(root) / "transcripts"
 
 
-def llm_runs_dir(root: str | Path) -> Path:
-    return plexus_dir(root) / "llm_runs"
-
-
 def jobs_dir(root: str | Path) -> Path:
     return plexus_dir(root) / "jobs"
-
-
-def held_dir(root: str | Path) -> Path:
-    return plexus_dir(root) / "held"
 
 
 def runs_dir(root: str | Path) -> Path:

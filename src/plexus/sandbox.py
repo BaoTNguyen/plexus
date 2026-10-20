@@ -20,8 +20,11 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from . import vascular_paths
 
 NETWORK = os.environ.get("HEART_MODEL_NETWORK", "heart-egress")
 PROXY = os.environ.get("HEART_EGRESS_CONTAINER", "egress")
@@ -79,7 +82,6 @@ def local_model_hosts() -> list[str]:
     the model server; bare, it also hands that agent the host's Postgres on 5432
     and heart's own server on 8000 -- a proxy defeating the reason it exists.
     """
-    from . import vascular_paths
     try:
         cfg = json.loads(vascular_paths.path("config", "heart", "models.json").read_text())
     except Exception:
@@ -216,7 +218,6 @@ def _wanted_config(allow: str, deny: str = "") -> dict:
 def _start_proxy(proxy: str, network: str, want: dict, script: Path) -> str:
     """Run one lane's proxy: on bridge for the way out, then attached to the
     lane's --internal network as the only container there that routes."""
-    from . import vascular_paths
     from .registry import seat_secrets, sentinel_seed
 
     if want["INJECT_PORT"]:
@@ -333,8 +334,6 @@ def seat_report() -> list[str]:
     """How each signed-in seat reaches a container, and the step that makes it
     better. Reported, never done: the token is the operator's to create and to
     type, and nothing here reads it."""
-    import time
-
     from .registry import codex_claims, detect_subscriptions, injected_seats, seat_secrets
 
     seats, injected, where = detect_subscriptions(), injected_seats(), seat_secrets()

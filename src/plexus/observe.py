@@ -10,8 +10,10 @@ import datetime
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from heart.pulse import load_events
+
 from .diagnose import phase_counts
-from .ledger import read
+from .ledger import open_escalations, read
 from . import vascular_state
 
 
@@ -44,7 +46,7 @@ def _now() -> datetime.datetime:
 def _last_activity(goal_id: str, goal_records: list[dict]) -> datetime.datetime:
     latest = max(r["ts"] for r in goal_records)
     try:  # the journal adds heart/arteries activity between ledger writes
-        from heart.pulse import load_events  # ponytail: full-journal scan, prune by day file if slow
+        # ponytail: full-journal scan, prune by day file if slow
         for e in load_events():
             if ((e.get("payload") or {}).get("goal_id") == goal_id
                     or str(e.get("task_id", "")).startswith(goal_id + "-")):
@@ -66,8 +68,7 @@ def _silent_layers(recs: list[dict], root: str, sample: int = 10) -> str | None:
     if not eps:
         return None
     recent = set(sorted(eps)[-sample:])
-    try:  # lazy: heart may be absent; the except below is the answer when it is
-        from heart.pulse import load_events
+    try:  # an unreadable journal: the except below is the answer
         events = [e for e in load_events() if e.get("episode_id") in recent]
     except Exception:
         return None  # no journal to judge by; say nothing rather than cry wolf
@@ -85,7 +86,7 @@ def _silent_layers(recs: list[dict], root: str, sample: int = 10) -> str | None:
     # silence has two causes with opposite fixes, and telling them apart matters:
     # an unwired repo needs installing, a wired one that went quiet is usually
     # Postgres being unreachable (capillaries retrieval cannot run without it).
-    if not vascular_state.repo_dir(root, "arteries").is_dir():
+    if not vascular_state.arteries_wired(root):
         return line + f"repo not wired; run `arteries setup claude --cwd {root}`"
     return line + "repo is wired, so check `plexus stack` for degraded writes"
 
@@ -107,12 +108,12 @@ def status(root: str = ".", stale_minutes: float = 30) -> tuple[list[str], int]:
                             if r["kind"] == "goal.finished"), None)
             lines.append(f"DONE     {goal_id}" + (f": {outcome}" if outcome else ""))
             continue
-        open_esc = kinds.count("escalation.raised") - kinds.count("escalation.resolved")
-        if open_esc > 0:
-            last = [r for r in rs if r["kind"] == "escalation.raised"][-1]
-            line = (f"BLOCKED  {goal_id}: {open_esc} escalation(s) open, latest "
-                    f"{last.get('feature_id', '?')} — {last.get('reason', 'no reason recorded')}")
-            if last.get("episode_ids"):
+        blocked = open_escalations(rs, goal_id)
+        if blocked:
+            last = blocked[-1]
+            line = (f"BLOCKED  {goal_id}: {sum(e['count'] for e in blocked)} escalation(s) "
+                    f"open, latest {last['feature_id']} — {last['reason'] or 'no reason recorded'}")
+            if last["episode_ids"]:
                 line += f"  drill down: pulse episode {last['episode_ids'][-1]}"
             lines.append(line)
             code = max(code, 1)
@@ -237,8 +238,6 @@ def report(roots: list[str | Path]) -> list[str]:
 def stack(hours: float = 24) -> list[str]:
     """Factory-wide rollup of the shared journal by source — event volume,
     failures, store degradation across heart/arteries/capillaries/marrow/plexus."""
-    # lazy: keeps plexus importable without heart; only `stack` reads the journal
-    from heart.pulse import load_events
     # hours 0 means all time; "" sorts below every ISO timestamp
     cutoff = "" if not hours else (_now() - datetime.timedelta(hours=hours)).isoformat()
     events = [e for e in load_events() if e.get("ts", "") >= cutoff]

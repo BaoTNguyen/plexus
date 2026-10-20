@@ -10,7 +10,6 @@ whatever else retry_context might carry (see run.py's blocked_on_decision
 resume payload, the existing mechanism this reuses).
 """
 import json
-import os
 import subprocess
 
 from plexus import ledger

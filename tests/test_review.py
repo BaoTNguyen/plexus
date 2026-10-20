@@ -28,6 +28,13 @@ from plexus import ledger, review  # noqa: E402
 from plexus import vascular_state
 from plexus.plan import matches  # noqa: E402
 from plexus.run import _stray_paths  # noqa: E402
+from plexus.review import diff_paths as _diff_paths  # noqa: E402
+from plexus.diagnose import _ESC_PHASE  # noqa: E402
+from plexus.plan import parse_expect  # noqa: E402
+from plexus.run import _check_expect  # noqa: E402
+from plexus.diagnose import _PHASE, classify_phase  # noqa: E402
+from plexus.spec import GoalSpec  # noqa: E402
+from plexus.run import _open_pr  # noqa: E402
 
 # --- glob matcher: one segment per `*`, `**` is the only one that spans ---
 assert matches("src/plexus/review.py", "src/plexus/*")
@@ -125,8 +132,6 @@ ledger.record("feature.landed", goal_id="g1", feature_id="f2", root=repo, commit
 # _stray_paths is only correct if it is fed git's own path format. Unit-testing
 # the matcher against hand-written strings would not catch a `git apply
 # --numstat` that returned `b/src/one.py`, so compose the two for real.
-from plexus.run import _diff_paths  # noqa: E402
-
 (repo / "src" / "three.py").write_text("x = 1\n")
 (repo / "LEDGER.md").write_text("law\n")
 subprocess.run([*git, "add", "-AN"], check=True)  # intent-to-add: new files show in diff
@@ -144,8 +149,6 @@ subprocess.run([*git, "reset", "-q"], check=True)
 
 # a scope violation is a planning failure, not a coding one — `plexus why` has
 # to say so, or the whole point of routing it to a human is lost
-from plexus.diagnose import _ESC_PHASE  # noqa: E402
-
 assert _ESC_PHASE["scope_violation"] == "intent"
 
 
@@ -178,7 +181,7 @@ assert "2 of 2 features will need line-by-line review." not in review.preview(re
 assert "1 of 2 features will need line-by-line review." in review.preview(repo)
 
 # --- a deletion nobody declared -------------------------------------------
-# The half `added_symbols` alone cannot see. A commit that quietly drops a
+# The half a check for added names alone cannot see. A commit that quietly drops a
 # public name leaves callers unresolved, and in this stack the caller is often
 # in the next repo up, so this is the pin test's failure one step earlier.
 c3 = commit({"src/two.py": "def beta():\n    return 2\n"}, "plexus: land f3")
@@ -200,9 +203,6 @@ rows4 = {r["feature_id"]: r for r in review.rows(FakeSpec, repo, repo)}
 assert rows4["f3"]["removed_symbols"] == [] and rows4["f3"]["verdict"] == "ok"
 
 # --- expect blocks: the mockup is executed, not filed ----------------------
-from plexus.plan import parse_expect  # noqa: E402
-from plexus.run import _check_expect  # noqa: E402
-
 assert parse_expect("just a spec") is None
 assert parse_expect("does what it says\n\nexpect:\nno command here") is None, \
     "a block with no `$ ` line is prose, not a mockup"
@@ -227,24 +227,18 @@ assert ok
 
 # an expect mismatch is an intent failure: the code works, it just isn't what
 # was signed off, so `plexus why` must not file it under coding
-from plexus.diagnose import _PHASE, classify_phase  # noqa: E402
-
 assert _PHASE["expect_mismatch"] == "intent"
 assert classify_phase("expect_mismatch", "pass", False) == "intent"
 
 # --- review_hold is on out of the box --------------------------------------
 # The whole surface is decoration if the riskiest commits still auto-land, so
 # the default is the policy, not the empty tuple.
-from plexus.spec import GoalSpec  # noqa: E402
-
 assert set(GoalSpec.review_hold) == {"spine", "boundary", "exec", "suspect"}
 
 # --- opening the PR never costs the run ------------------------------------
 # Every way this can be unavailable has to return a string, not raise: the goal
 # is already committed by the time it runs, so a missing remote must not turn a
 # finished goal into a failed one. No network is touched by any of these paths.
-from plexus.run import _open_pr  # noqa: E402
-
 
 class PRSpec:
     goal_id = "g1"

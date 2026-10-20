@@ -13,8 +13,8 @@ is a derived view and may be regenerated or lost without losing truth.
 | Fact domain | System of record | Derived views | Degraded fallback |
 |---|---|---|---|
 | Prompt corpus, retrieval | capillaries Postgres | — | — |
-| Turns, memories, gate/reward decisions | arteries Postgres | spine tee | repo-local JSONL (`store: jsonl` flags it) |
-| Episode execution (diff, verifiers, reward) | heart `runs/<id>/episode.json` | spine events, `episodes.jsonl` export | — |
+| Turns, memories, gate decisions | arteries Postgres | spine tee | repo-local JSONL (`store: jsonl` flags it) |
+| Episode execution (diff, verifiers, outcome) | heart `runs/<id>/episode.json` | spine events, `episodes.jsonl` export | — |
 | Goals, plans, features, acceptance, escalations | plexus `.plexus/ledger.jsonl` | spine events, `labels.jsonl`/`plans.jsonl` exports | none — fsynced, must succeed |
 | Training runs, checkpoints | marrow | spine events | — |
 | Live cross-stack view | — (derived only) | the spine journal | — |
@@ -34,7 +34,7 @@ Rules that keep the stores from conflicting:
    `<goal_id>-<feature_id>-a<attempt>` task_id convention is a grep
    convenience for the journal; correctness always joins through the
    `task_id`/`episode_id` fields recorded in ledger records.
-5. **Two rewards never merge.** Heart's verifier reward and plexus's
+5. **Two judgments never merge.** Heart's verifier outcome and plexus's
    acceptance label are different judgments of the same episode and are kept
    in separate fields forever. An episode that passed heart but failed
    acceptance is a hard negative — collapsing the two destroys exactly that

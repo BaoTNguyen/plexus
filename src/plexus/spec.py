@@ -57,6 +57,9 @@ timeout = 300
 
 [review]
 hold = ["spine", "boundary", "exec", "suspect"]
+# boundary = ["src/pkg/sandbox.py", "src/pkg/run.py::_container_env"]
+#   trust boundaries no import graph shows: a diff touching one of these
+#   paths (or the named top-level function in that file) is held as boundary
 # risk classes that escalate for your sign-off instead of auto-landing, even
 # when acceptance is green — the software-factory boundary. exec is read off
 # the diff: hooks, CI, manifests, conftest.py — files that run on your machine.
@@ -106,6 +109,10 @@ class GoalSpec:
     # unattended factory whose riskiest commits land unread is not a factory,
     # it is a liability.
     review_hold: tuple[str, ...] = ("spine", "boundary", "exec", "suspect")
+    # Trust boundaries no import graph shows: `path` globs or `path::function`
+    # (e.g. the code that decides what env and mounts reach a sandbox). A diff
+    # touching one is held as boundary whatever the plan called the feature.
+    review_boundary: tuple[str, ...] = field(default_factory=tuple)
     pr_base: str = "main"  # "" disables pushing/PR-opening entirely
     # The one human-judgement field that is not prose: claims no suite can
     # make, which gate delivery until you confirm them. Structured because
@@ -164,6 +171,7 @@ def load_spec(root: str | Path = ".") -> GoalSpec:
         network=str(agent.get("network", "web")),
         spec_hash=hashlib.sha256(raw).hexdigest()[:12],
         review_hold=tuple(review.get("hold", ("spine", "boundary", "exec", "suspect"))),
+        review_boundary=tuple(review.get("boundary", ())),
         pr_base=review.get("pr_base", "main"),
         # `[scope].manual_checks` is where these lived before the overview split
         # the prose out; read it so an existing repo keeps its checks.
@@ -182,7 +190,7 @@ def install_integration(root: str | Path = ".") -> str:
     green, which is why this has to happen at init rather than be noticed later.
     Best effort: arteries may not be installed, and a goal repo without it works.
     """
-    if vascular_state.repo_dir(root, "arteries").is_dir():
+    if vascular_state.arteries_wired(root):
         return "arteries: already wired"
     try:
         r = subprocess.run(

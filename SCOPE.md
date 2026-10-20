@@ -28,15 +28,14 @@ Heart names the failure instead of misattributing it.
 | `sandbox.denied` | the sandbox refused ground the spec **permitted** — our misconfiguration |
 | `guardrail.hit` with `rules: ["denied_path_probe"]` | the agent reached for ground the spec **forbade** — its violation |
 
-The distinction is load-bearing. Without it, `scope_denied` is a reward hack: an
-agent heading for a bad score writes one byte into a denied path, produces an
-empty diff plus a refusal, and escapes being scored at all. Heart classifies the
+The distinction is load-bearing. Without it, `scope_denied` is an escape hatch:
+an agent heading for a fail writes one byte into a denied path, produces an
+empty diff plus a refusal, and is excused instead of failed. Heart classifies the
 refusal by the path it names, so forbidden ground yields `path_violation` while
 permitted ground yields `scope_denied`.
 
-`scope_denied` carries **no reward** — `None`, not `0.0`. Zero would blame the
-model for a sandbox we drew too tight, and training on it teaches that the task
-is impossible.
+`scope_denied` is an excuse, not a fail. Failing it would blame the model for a
+sandbox we drew too tight.
 
 ## What plexus does about it
 
@@ -82,8 +81,8 @@ unrestricted default `run.py` dispatches with today.
 **A probe never becomes a permission.** `needed` and `probed` are recorded
 separately and `for_task` never merges them. A path the agent was caught
 reaching for is evidence the prohibition is *working*. Folding the two would let
-an agent widen its own boundary by repeatedly reaching past it — the same reward
-hack heart closes at the classification layer, closed again here.
+an agent widen its own boundary by repeatedly reaching past it — the same escape
+hatch heart closes at the classification layer, closed again here.
 
 **Scope is derived from refusals, never from requests.** A refusal is the kernel
 reporting a fact. Anything the agent says about what it needs is an account of

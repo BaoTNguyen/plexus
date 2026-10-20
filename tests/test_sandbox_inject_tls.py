@@ -1,7 +1,6 @@
 """INJECT_TLS_PORT: only offered to the proxy once its own cert exists, and
 only for the ChatGPT route that needs it -- never a promise the proxy can't
 back."""
-import pytest
 
 from plexus import sandbox
 

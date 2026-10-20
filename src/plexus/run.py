@@ -4,15 +4,15 @@ the next feature) or retry within the attempt budget. Budget exhausted ->
 escalate and pause. Re-running resumes from the next open feature.
 
 Two judgments, kept apart on purpose (LEDGER law 5): heart judges with the
-repo's own suite (`detect_verifiers`) — its reward is a pure regression /
+repo's own suite (`detect_verifiers`) — its outcome is a pure regression /
 correctness signal — while plexus runs the feature's acceptance criterion in
 its *own* worktree, entirely outside the episode. The two are recorded in
 separate fields and can now disagree, which is the whole point: the
 (regression, acceptance) 2x2 is what separates "wrong plan" from "wrong code",
 and the "heart passed / acceptance failed" cell is the hard negative marrow
-cannot otherwise see. Acceptance stays out of heart's reward on purpose —
-heart's hidden verifiers dominate its reward (weight 0.45), so routing the
-criterion through them would merge the two rewards, which LEDGER law 5 forbids.
+cannot otherwise see. Acceptance stays out of heart's verifiers on purpose —
+routing the criterion through them would merge the two judgments, which
+LEDGER law 5 forbids.
 Merging them is marrow's job, never plexus's.
 """
 from __future__ import annotations
@@ -27,11 +27,12 @@ import tomllib
 from pathlib import Path
 
 from heart.detect import detect_verifiers
-from heart.env import Workspace
+from heart.env import Workspace, prune_repo_worktrees
 from heart.episode import DEFAULT_ROLES, best_episode, run_candidates
 from heart.orchestrate import run_orchestrated
 from heart.runner import SANDBOX_MODE, run_contained
 from heart.taskspec import TaskSpec, Verifier
+from heart.verify import run_verifiers
 
 from . import events, ledger, scope
 from . import tasks as _tasks
@@ -39,7 +40,7 @@ from . import vascular_state
 from .plan import matches as _matches
 from .plan import execution_order, load_plan, parse_expect
 from .registry import load_registry, seed_upstream
-from .review import classify, cross_repo_callers, exec_surface, report, suspicious
+from .review import classify, cross_repo_callers, diff_paths, exec_surface, report, suspicious, trust_boundary
 
 # heart episode outcomes that are mechanical failures — no valid applied diff to
 # judge a criterion against, so acceptance is skipped and it's a coding failure.
@@ -49,7 +50,7 @@ _MECHANICAL = {
     "apply_failed": "apply_failed",
     "episode_error": "episode_error",
     "timeout": "timeout",
-    # a secret in the diff — heart zeroes reward and skips verify, same as a path
+    # a secret in the diff — heart fails the episode and skips verify, same as a path
     # violation. Kept as its own class so `plexus why` names it instead of hiding
     # a leaked credential behind a generic episode_error.
     "guardrail_violation": "guardrail_violation",
@@ -269,7 +270,6 @@ def _feature_state(recs: list[dict], goal_id: str,
     not charge the feature for it."""
     landed = False
     max_attempt = 0
-    open_escalations = 0
     budget_used = 0
     pending = False       # an unflushed feature.started
     had_sandbox_failure = False
@@ -295,17 +295,15 @@ def _feature_state(recs: list[dict], goal_id: str,
             had_sandbox_failure = True
         elif kind == "seat.exhausted":
             had_seat_exhausted = True
-        elif kind == "escalation.raised":
-            open_escalations += 1
         elif kind == "escalation.resolved":
-            open_escalations -= 1
             budget_used = 0  # resolving hands the feature a fresh budget
             pending = False
     if pending and not ((had_sandbox_failure or had_seat_exhausted) and not had_failed):
         budget_used += 1
     if landed:
         return "landed", max_attempt, budget_used
-    state = "escalated" if open_escalations > 0 else "open"
+    blocked = any(e["feature_id"] == feature_id for e in ledger.open_escalations(recs, goal_id))
+    state = "escalated" if blocked else "open"
     return state, max_attempt + 1, budget_used
 
 
@@ -354,7 +352,8 @@ SEAT_TAIL_LINES = 15
 
 
 def _check_seat_exhausted(ep: dict, runs_dir: Path, goal_id: str,
-                          feature_id: str, attempt: int, root: Path) -> bool:
+                          feature_id: str, attempt: int, root: Path,
+                          span: dict | None = None) -> bool:
     """Scan every role's log of a normal-build episode for a seat-exhaustion
     signal. On a match, record `seat.exhausted` (excluded from attempt
     counting, see `_feature_state`) and `escalation.raised` with
@@ -387,7 +386,7 @@ def _check_seat_exhausted(ep: dict, runs_dir: Path, goal_id: str,
             "escalation.raised", goal_id=goal_id, feature_id=feature_id,
             root=root, reason_class="seat_exhausted",
             reason=f"seat '{seat}' hit its usage limit, resets {reset}",
-            episode_ids=[ep["episode_id"]])
+            episode_ids=[ep["episode_id"]], **(span or {}))
         return True
     return False
 
@@ -407,7 +406,7 @@ def _run_acceptance(repo: str | Path, base_commit: str, diff: str,
                     ) -> tuple[bool, str, str]:
     """Plexus's own judgment, in its own clean worktree: check out the base,
     apply the episode's diff, run the feature criterion. Deliberately outside
-    heart's episode so heart's reward stays a pure regression signal (see module
+    heart's episode so heart's outcome stays a pure regression signal (see module
     docstring). Reuses heart's Workspace — worktrees belong to heart.
 
     Returns (passed, tail, stage) where stage names which check said no —
@@ -510,7 +509,7 @@ def _resolved_hold(recs: list[dict], goal_id: str, feature_id: str) -> str:
 
 
 def _land_held(spec, feat: dict, root: Path, runs_dir, ep_id: str,
-               attempt: int) -> bool:
+               attempt: int, plan_id: str) -> bool:
     """Land the diff a resolved hold signed off. No episode is built: what
     lands is what was read. If the diff is gone, no longer applies, or its
     acceptance now fails on the current base, hold again with the reason --
@@ -528,35 +527,28 @@ def _land_held(spec, feat: dict, root: Path, runs_dir, ep_id: str,
         diff = patch.read_text()
         ok, tail, stage = _run_acceptance(repo, _head(repo), diff, feat["acceptance"],
                                           spec.timeout, parse_expect(feat["spec"]))
-        stray = _stray_paths(_diff_paths(repo, diff), feat.get("touches")) if ok else []
+        stray = _stray_paths(diff_paths(repo, diff), feat.get("touches")) if ok else []
         if not ok:
             why = f"{stage} no longer passes on the current base: {tail[-300:]}"
         elif stray:
             why = "it touches paths the plan does not authorise: " + ", ".join(stray[:10])
     task_id = events.make_task_id(spec.goal_id, feat["id"], attempt)
+    span = {"span_id": events.attempt_span(plan_id, feat["id"], attempt),
+            "trace_id": events.trace_for(plan_id)}
     if why:
         ledger.record("escalation.raised", goal_id=spec.goal_id, feature_id=feat["id"],
                       root=root, reason_class="held_stale",
                       reason=f"the signed-off diff from {ep_id} can't land: {why} "
                              f"-- resolve to rebuild the feature (the rebuild is held "
                              f"for sign-off again)",
-                      episode_ids=[ep_id], **cost)
+                      episode_ids=[ep_id], **cost, **span)
         return False
     commit = _land(repo, diff, feat["id"])
     ledger.record("feature.landed", goal_id=spec.goal_id, feature_id=feat["id"],
                   root=root, attempt=attempt, task_id=task_id, episode_id=ep_id,
-                  commit=commit, from_held=ep_id, **cost)
+                  commit=commit, from_held=ep_id, **cost, **span)
     print(f"landed {feat['id']} from signed-off episode {ep_id}")
     return True
-
-
-def _diff_paths(repo: str | Path, diff: str) -> list[str]:
-    """The files the episode's diff touches, per git itself. `--numstat` with a
-    dry run parses the patch without changing anything; the third column is the
-    path (binary files report `-`/`-` counts, still with a path)."""
-    r = subprocess.run(["git", "-C", str(repo), "apply", "--numstat", "-"],
-                       input=diff, text=True, capture_output=True, check=True)
-    return [line.split("\t", 2)[2] for line in r.stdout.splitlines() if "\t" in line]
 
 
 def _stray_paths(paths: list[str], touches: list[str] | None) -> list[str]:
@@ -575,7 +567,7 @@ def _land(repo: str | Path, diff: str, feature_id: str) -> str:
     is a real working tree: it holds the user's unrelated edits and plexus's own
     `.vascular/plexus/runs/` episode dumps, and a blanket add would sweep both into the feature
     commit and into the goal's history."""
-    paths = _diff_paths(repo, diff)
+    paths = diff_paths(repo, diff)
     subprocess.run(["git", "-C", str(repo), "apply", "--whitespace=nowarn"],
                    input=diff, text=True, capture_output=True, check=True)
     _git(repo, "add", "--", *paths)  # tracks new files so the pathspec commit sees them
@@ -724,8 +716,6 @@ def _probe_regression_signal(repo: str, base: str, timeout: int, goal_id: str) -
         if not verifiers:
             marker.write_text("no verifiers\n")
             return
-        # lazy: inside the best-effort probe, so an import failure stays silent
-        from heart.verify import run_verifiers
         runs = []
         for _ in range(2):
             ws = Workspace(repo, base)
@@ -811,14 +801,32 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
     board_task = task_id
     # reclaim any worktrees a previously killed run leaked (safe now: the lock we
     # just took means no live episode for this repo exists)
-    try:  # lazy: reclaiming leaked worktrees is best-effort, import included
-        from heart.env import prune_repo_worktrees
+    try:  # reclaiming leaked worktrees is best-effort
         prune_repo_worktrees(repo)
     except Exception:
         pass
     plan = load_plan(root, task_id)
     recs = ledger.read(root)
     plan_id = str(plan[0].get("plan_id", "")) if plan else ""
+    # every episode this plan dispatches joins one trace (plexus runs serially)
+    prev_trace = os.environ.get("PULSE_TRACE_ID")
+    os.environ["PULSE_TRACE_ID"] = events.trace_for(plan_id)
+    try:
+        return _walk_plan(spec, root, runs_dir, candidates, task_id, repo,
+                          board_task, plan, recs, plan_id)
+    finally:
+        _restore_env("PULSE_TRACE_ID", prev_trace)
+
+
+def _restore_env(name: str, prev: str | None) -> None:
+    if prev is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = prev
+
+
+def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
+               repo: str, board_task: str, plan, recs, plan_id: str) -> int:
     if not any(r.get("kind") == "plan.approved"
                and r.get("goal_id") == spec.goal_id
                and r.get("plan_id") == plan_id for r in recs):
@@ -878,7 +886,8 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
 
         held_ep = _resolved_hold(recs, spec.goal_id, fid)
         if held_ep:
-            if not _land_held(spec, feat, root, runs_dir, held_ep, next_attempt - 1):
+            if not _land_held(spec, feat, root, runs_dir, held_ep, next_attempt - 1,
+                              plan_id):
                 return 1
             continue
 
@@ -889,11 +898,14 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
         last_episode_ids: list[str] = []
         attempt = next_attempt
         budget = spec.attempts_per_feature - budget_used
+        span: dict[str, str] = {}
         for i in range(budget):
             task_id = events.make_task_id(spec.goal_id, fid, attempt)
+            span = {"span_id": events.attempt_span(plan_id, fid, attempt),
+                    "trace_id": events.trace_for(plan_id)}
             ledger.record("feature.started", goal_id=spec.goal_id, feature_id=fid,
                           root=root, attempt=attempt, task_id=task_id,
-                          retry_context=retry_context)
+                          retry_context=retry_context, **span)
             base = _head(repo)
             task = TaskSpec(
                 task_id=task_id, repo_path=repo, base_commit=base,
@@ -905,17 +917,19 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 skills=feat.get("skills", []),
                 difficulty=feat.get("difficulty", "unknown"),
                 effort=feat.get("effort", ""),
-                # heart owns the mechanism (outcome="blocked", reward withheld);
+                # heart owns the mechanism (outcome="blocked");
                 # plexus owns the vocabulary and what a block costs
                 blocked_marker=_BLOCKED_MARKER,
                 network=spec.network,
             )
             # goal lineage: heart's emit() stamps these into every event of the
             # dispatched episode, so `heart pulse goal <id>` can trace
-            # goal -> feature -> episode -> reward (plexus runs serially, so
+            # goal -> feature -> episode -> outcome (plexus runs serially, so
             # process-global env is safe here)
             os.environ["PLEXUS_GOAL_ID"] = spec.goal_id
             os.environ["PLEXUS_FEATURE_ID"] = fid
+            prev_parent = os.environ.get("PULSE_PARENT_SPAN")
+            os.environ["PULSE_PARENT_SPAN"] = span["span_id"]
             try:
                 # retrieval is left on: a feature prompt is fully specified and
                 # long, so capillaries' gate skips it on its own (out of the
@@ -936,11 +950,12 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                     root=root, reason_class="sandbox_unavailable",
                     reason=f"sandbox failed to start 3 times in a row: "
                            f"{exc.last_error}",
-                    episode_ids=last_episode_ids)
+                    episode_ids=last_episode_ids, **span)
                 return 1
             finally:
                 os.environ.pop("PLEXUS_GOAL_ID", None)
                 os.environ.pop("PLEXUS_FEATURE_ID", None)
+                _restore_env("PULSE_PARENT_SPAN", prev_parent)
             ep_id = ep["episode_id"]
             last_episode_ids.append(ep_id)
             ep_outcome = ep["outcome"]
@@ -954,7 +969,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
             # this one's, and a candidate with no roles has no log to read.
             if not spec.orchestrate and any(
                     _check_seat_exhausted(c, root / runs_dir, spec.goal_id,
-                                         fid, attempt, root)
+                                         fid, attempt, root, span)
                     for c in cands if c.get("roles")):
                 return 1
 
@@ -977,12 +992,12 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                         root=root, reason_class="attempts_exhausted",
                         reason=f"still blocked after {_BLOCKS_PER_FEATURE} answered "
                                f"decisions — the goal is likely underspecified: {question}",
-                        episode_ids=last_episode_ids)
+                        episode_ids=last_episode_ids, **span)
                 else:
                     ledger.record(
                         "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
                         root=root, reason_class="blocked_on_decision",
-                        reason=question, episode_ids=[ep_id])
+                        reason=question, episode_ids=[ep_id], **span)
                 return 1  # a human (later, the router) owes an answer before we go on
 
             # mechanical failure: no valid applied diff to judge — a coding failure,
@@ -995,12 +1010,12 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                               episode_id=ep_id,
                               failure_class=_MECHANICAL.get(ep_outcome, "episode_error"),
                               episode_outcome=ep_outcome, acceptance_passed=None,
-                              reason=f"outcome={ep_outcome}", **attempt_cost)
+                              reason=f"outcome={ep_outcome}", **attempt_cost, **span)
                 retry_context = {**retry_context, "failure_tail": _verifier_tail(ep)}
                 attempt += 1
                 continue
 
-            # plexus's own judgment, in its own worktree, never in heart's reward
+            # plexus's own judgment, in its own worktree, never in heart's verdict
             acc_passed, acc_tail, acc_stage = _run_acceptance(
                 repo, base, diff, feat["acceptance"], spec.timeout,
                 parse_expect(feat["spec"]))
@@ -1010,7 +1025,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                           episode_outcome=ep_outcome, check=feat["acceptance"],
                           # `passed` stays the round's single verdict — the
                           # expect block is part of plexus's acceptance, not a
-                          # second reward — and this names which half said no
+                          # second verdict — and this names which half said no
                           failed_stage=acc_stage or None)
 
             # land only when the criterion passes AND nothing regressed AND review ok.
@@ -1038,7 +1053,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                         "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
                         root=root, reason_class="held_for_review",
                         reason=f"acceptance passed but the review did not run: {review_note}",
-                        episode_ids=[ep_id], held_cost=attempt_cost)
+                        episode_ids=[ep_id], held_cost=attempt_cost, **span)
                     return 1
                 # Software-factory boundary: a green feature whose risk class is
                 # on the goal's review-hold list waits for a human sign-off
@@ -1049,7 +1064,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 # the plan's class is a prediction; what the diff actually
                 # touches can raise it -- a hook or a manifest runs on your
                 # machine whatever the plan called the feature
-                runs_here = exec_surface(_diff_paths(repo, diff))
+                runs_here = exec_surface(diff_paths(repo, diff))
                 flags = suspicious(repo, base, diff)
                 if cls not in spec.review_hold:
                     cls = "exec" if runs_here else "suspect" if flags else cls
@@ -1057,6 +1072,9 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                 # to is a break plexus can't see from one repo alone
                 callers = cross_repo_callers(repo, base, diff)
                 if cls not in spec.review_hold and callers:
+                    cls = "boundary"
+                trust = trust_boundary(diff, spec.review_boundary)
+                if cls not in spec.review_hold and trust:
                     cls = "boundary"
                 if cls in spec.review_hold:
                     ledger.record(
@@ -1070,15 +1088,17 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                                + (f" (new in this diff: {'; '.join(flags[:5])})"
                                   if flags else "")
                                + (f" (called from: {', '.join(callers[:10])})"
-                                  if callers else ""),
+                                  if callers else "")
+                               + (f" (trust boundary: {', '.join(trust)})"
+                                  if trust else ""),
                         # not cost_usd: cost summers read every record, and this
                         # attempt's cost lands on whichever record settles it
-                        episode_ids=[ep_id], held_cost=attempt_cost)
+                        episode_ids=[ep_id], held_cost=attempt_cost, **span)
                     return 1
                 # Scope gate, last thing before the commit exists. Not a retry:
                 # the agent and the plan disagree about how wide the feature is,
                 # and only a human can say which of the two is wrong.
-                stray = _stray_paths(_diff_paths(repo, diff), feat.get("touches"))
+                stray = _stray_paths(diff_paths(repo, diff), feat.get("touches"))
                 if stray:
                     ledger.record(
                         "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
@@ -1086,12 +1106,12 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                         reason="diff touched paths the plan did not authorise: "
                                + ", ".join(sorted(stray)[:10])
                                + f" (allowed: {', '.join(feat['touches'])})",
-                        episode_ids=[ep_id])
+                        episode_ids=[ep_id], **span)
                     return 1
                 commit = _land(repo, diff, fid)
                 ledger.record("feature.landed", goal_id=spec.goal_id, feature_id=fid,
                               root=root, attempt=attempt, task_id=task_id,
-                              episode_id=ep_id, commit=commit, **attempt_cost)
+                              episode_id=ep_id, commit=commit, **attempt_cost, **span)
                 # an approve verdict still carries findings -- a blocker never
                 # ships, but a concern the reviewer judged "not fatal" lands
                 # anyway, so record it instead of letting the verdict word
@@ -1131,7 +1151,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                                   if acc_stage == "expect" else
                                   f"acceptance={'pass' if acc_passed else 'fail'}")
                                  + f" regression={'FAIL' if ep_outcome == 'fail' else 'ok'}",
-                          **attempt_cost)
+                          **attempt_cost, **span)
             if review == "reject":
                 findings = [
                     {"severity": f.get("severity"), "file": f.get("file"),
@@ -1148,7 +1168,7 @@ def _walk(spec, root: Path, runs_dir, candidates: int, task_id: str) -> int:
                           root=root, reason_class="attempts_exhausted",
                           reason=f"{spec.attempts_per_feature} attempts failed "
                                  f"acceptance: {feat['acceptance']}",
-                          episode_ids=last_episode_ids)
+                          episode_ids=last_episode_ids, **span)
             return 1
 
     # scope gate: the full ground-truth suite on the built-up tree

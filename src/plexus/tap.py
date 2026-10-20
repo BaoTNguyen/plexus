@@ -14,9 +14,13 @@ Usage: tmux pipe-pane -o 'python3 -m plexus.tap /path/to/session.log'
 
 from __future__ import annotations
 
+import io
 import sys
+import tempfile
 import time
 from pathlib import Path
+
+from . import translog
 
 
 def tap(path: str | Path, stream=None) -> None:
@@ -39,16 +43,12 @@ def tap(path: str | Path, stream=None) -> None:
 
 
 def demo() -> None:
-    import io
-    import tempfile
-
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "s.log"
         tap(out, io.BytesIO(b"hello\r\nworld\r\n"))
         assert out.read_bytes() == b"hello\r\nworld\r\n"
         delay, count = out.with_suffix(".log.timing").read_text().split()
         assert int(count) == 14 and float(delay) >= 0
-        from . import translog
         assert [r["text"] for r in translog.lines(out)] == ["hello", "world"]
     print("tap self-check ok")
 

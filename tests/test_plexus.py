@@ -1,11 +1,17 @@
 """Self-check, mirroring heart's tests/test_heart.py style: stdlib asserts,
 no frameworks, no network. Run: python3 tests/test_plexus.py
 """
+import base64
+import contextlib
+import fcntl
+import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 tmp = Path(tempfile.mkdtemp(prefix="plexus-test-"))
 os.environ["EVENT_JOURNAL_DIR"] = str(tmp / "journal")
@@ -20,6 +26,38 @@ sys.path.insert(0, str(here.parents[1] / "src"))
 sys.path.append(str(here.parents[2] / "heart" / "src"))
 from plexus import events, ledger, observe  # noqa: E402
 from plexus import vascular_state  # noqa: E402
+from plexus import diagnose  # noqa: E402
+from plexus import observe as _obs  # noqa: E402
+from heart.episode import _blocked_reason  # noqa: E402
+from plexus.run import _BLOCKED_MARKER, _blocks_so_far, _resume_answer  # noqa: E402
+from plexus.run import _feature_state  # noqa: E402
+from plexus.review import diff_paths as _diff_paths  # noqa: E402
+from plexus.run import _land  # noqa: E402
+from plexus import plan as planmod  # noqa: E402
+from plexus.spec import GoalSpec  # noqa: E402
+from plexus.run import _lock_goal  # noqa: E402
+from plexus.observe import _silent_layers  # noqa: E402
+from plexus.export import build_rows, export  # noqa: E402
+from plexus.prune import plan_prune, prune  # noqa: E402
+from plexus.plan import _parse_features  # noqa: E402
+from plexus.run import _episode_cost  # noqa: E402
+from plexus.run import _goal_spend  # noqa: E402
+from plexus.plan import amend, load_plan, plan_path  # noqa: E402
+from plexus import serve  # noqa: E402
+from plexus.run import _missing_upstream  # noqa: E402
+from plexus import registry  # noqa: E402
+from plexus.spec import load_spec  # noqa: E402
+from plexus.run import _resolved_hold  # noqa: E402
+from plexus import cli  # noqa: E402
+from plexus import sandbox  # noqa: E402
+from plexus import run as _run  # noqa: E402
+from plexus.plan import _retrieved  # noqa: E402
+from plexus.review import suspicious  # noqa: E402
+from plexus.run import _roles  # noqa: E402
+from plexus import spec as _spec  # noqa: E402
+from plexus.review import exec_surface  # noqa: E402
+from plexus import plan as _plan, serve as _serve, tasks as _tasks  # noqa: E402
+from plexus import tap as _tap, translog as _translog  # noqa: E402
 
 root = tmp / "repo"
 
@@ -83,8 +121,6 @@ out = observe.stack(hours=1)
 assert any("plexus" in l for l in out), out
 
 # --- diagnose: phase classification + evidence bundle ---
-from plexus import diagnose  # noqa: E402
-
 assert diagnose.classify_phase("no_change") == "coding"
 assert diagnose.classify_phase("apply_failed") == "coding"
 assert diagnose.classify_phase("acceptance_failed") == "testing"  # no pair -> stays testing
@@ -114,15 +150,11 @@ assert "[coding]" in blob and "[testing]" in blob, blob          # both phases a
 assert "pulse episode e2" in blob, blob                          # drill-down to raw traces
 assert "escalation [attempts_exhausted]" in blob, blob
 # phase rollup surfaces in insights
-from plexus import observe as _obs  # noqa: E402
 assert any("failures by phase" in l for l in _obs.insights(droot)), _obs.insights(droot)
 # targeting an unknown feature is explained, not silent
 assert "no failures or escalations" in "\n".join(diagnose.why(droot, "nope"))
 
 # --- blocked-on-decision channel: detection, budget, resume-answer injection ---
-from heart.episode import _blocked_reason  # noqa: E402
-from plexus.run import _BLOCKED_MARKER, _blocks_so_far, _resume_answer  # noqa: E402
-
 # detection lives in heart now (outcome="blocked"); plexus only supplies the word
 M = _BLOCKED_MARKER
 assert _blocked_reason("diff --git a/PLEXUS_BLOCKED b/PLEXUS_BLOCKED\n"
@@ -169,8 +201,6 @@ uw = "\n".join(diagnose.why(uroot, "uf"))
 assert "phase verdict: intent" in uw and "unconfirmed" in uw, uw
 
 # --- run loop: resumable state derivation, the pure core, no agent needed ---
-from plexus.run import _feature_state  # noqa: E402
-
 R = lambda **k: {"goal_id": "g", **k}  # noqa: E731
 # open feature, first attempt, no budget spent
 assert _feature_state([], "g", "f1") == ("open", 1, 0)
@@ -194,10 +224,6 @@ assert _feature_state([{"goal_id": "other", "kind": "feature.landed",
                         "feature_id": "f1"}], "g", "f1") == ("open", 1, 0)
 
 # --- _land commits only the diff's paths, not the whole dirty tree ---
-import subprocess  # noqa: E402
-
-from plexus.run import _diff_paths, _land  # noqa: E402
-
 g = tmp / "landrepo"
 g.mkdir()
 G = lambda *a: subprocess.run(["git", "-C", str(g), *a], check=True,  # noqa: E731
@@ -227,10 +253,18 @@ assert committed == ["seed.txt"], f"land swept in extra files: {committed}"
 assert (vascular_state.runs_dir(g) / "episode.json").exists() and (g / "mine.txt").exists()
 assert "mine.txt" in G("status", "--porcelain"), "unrelated edit was consumed"
 
-# --- approve gate: criteria must fail on the base commit ---
-from plexus import plan as planmod  # noqa: E402
-from plexus.spec import GoalSpec  # noqa: E402
+# a rename touches its source too, and a non-ASCII name must reach git add raw,
+# not C-quoted -- otherwise the commit keeps the old file, or add fails after
+# apply has already changed the tree
+(g / "old.py").write_text("x = 1\n"); G("add", "-A"); G("commit", "-qm", "old")
+G("mv", "old.py", "new.py"); (g / "café.md").write_text("menu\n"); G("add", "-A")
+diff = G("diff", "--cached"); G("reset", "-q", "--hard")
+assert sorted(_diff_paths(g, diff)) == ["café.md", "new.py", "old.py"], _diff_paths(g, diff)
+_land(g, diff, "f2")
+assert "old.py" not in G("ls-files", "-z").split("\0"), "rename landed without deleting its source"
+assert "café.md" in G("ls-files", "-z").split("\0")
 
+# --- approve gate: criteria must fail on the base commit ---
 # dependencies are hard ordering constraints; priority breaks ties only among
 # work whose prerequisites have landed
 unordered = [
@@ -284,10 +318,6 @@ assert (g / "notified").read_text().strip() == "blocked_on_decision/f9"
 ledger.record("escalation.raised", goal_id="lg", feature_id="f9", root=g)  # must not raise
 
 # --- one run per goal repo: concurrent runs would race _land on one branch ---
-import fcntl  # noqa: E402
-
-from plexus.run import _lock_goal  # noqa: E402
-
 lroot = tmp / "lockrepo"
 lroot.mkdir(parents=True, exist_ok=True)
 _lock_goal(lroot)
@@ -309,8 +339,6 @@ fcntl.flock(held, fcntl.LOCK_UN)
 held.close()
 
 # --- silent-layer detection: a repo that runs blind must say so ---
-from plexus.observe import _silent_layers  # noqa: E402
-
 # no episodes recorded yet -> nothing to judge, stay quiet
 assert _silent_layers([], ".") is None
 assert _silent_layers([{"kind": "goal.started", "goal_id": "g"}], ".") is None
@@ -319,19 +347,16 @@ assert _silent_layers([{"kind": "acceptance.round", "episode_id": "no-such-episo
                       ".") is None
 
 # --- export: the join that makes the 2x2 visible to anything downstream ---
-from plexus.export import build_rows, export  # noqa: E402
-from plexus.prune import plan_prune, prune  # noqa: E402
-
 xr = tmp / "exportrepo"
 vascular_state.runs_dir(xr).mkdir(parents=True, exist_ok=True)
 
 
-def _episode(ep_id: str, outcome: str, reward, task_id: str) -> None:
+def _episode(ep_id: str, outcome: str, task_id: str) -> None:
     d = vascular_state.runs_dir(xr) / ep_id
     d.mkdir(parents=True, exist_ok=True)
     (d / "episode.json").write_text(json.dumps({
         "episode_id": ep_id, "task_id": task_id, "outcome": outcome,
-        "reward": {"total": reward, "components": {}}, "diff_lines": 12,
+        "diff_lines": 12,
         "agent": "claude"}))
 
 
@@ -341,7 +366,7 @@ ledger.record("plan.created", goal_id="xg", root=xr, plan_id="p1", features=[
     {"feature_id": "f2", "title": "two", "acceptance": "pytest tests/f2.py"}])
 
 # f1 attempt 1: heart green, criterion unmet — the hard negative marrow needs
-_episode("ep-a", "pass", 0.97, "xg-f1-a1")
+_episode("ep-a", "pass", "xg-f1-a1")
 ledger.record("acceptance.round", goal_id="xg", feature_id="f1", root=xr,
               attempt=1, task_id="xg-f1-a1", episode_id="ep-a", passed=False,
               episode_outcome="pass", check="pytest tests/f1.py")
@@ -349,14 +374,14 @@ ledger.record("feature.failed", goal_id="xg", feature_id="f1", root=xr, attempt=
               task_id="xg-f1-a1", episode_id="ep-a", failure_class="acceptance_failed",
               episode_outcome="pass", acceptance_passed=False, reason="x")
 # f1 attempt 2 lands
-_episode("ep-b", "pass", 0.99, "xg-f1-a2")
+_episode("ep-b", "pass", "xg-f1-a2")
 ledger.record("acceptance.round", goal_id="xg", feature_id="f1", root=xr, attempt=2,
               task_id="xg-f1-a2", episode_id="ep-b", passed=True,
               episode_outcome="pass", check="pytest tests/f1.py")
 ledger.record("feature.landed", goal_id="xg", feature_id="f1", root=xr, attempt=2,
               task_id="xg-f1-a2", episode_id="ep-b", commit="deadbeef")
 # f2 blocked, still open — no acceptance ever ran, attempt only in the task_id
-_episode("ep-c", "blocked", None, "xg-f2-a1")
+_episode("ep-c", "blocked", "xg-f2-a1")
 ledger.record("escalation.raised", goal_id="xg", feature_id="f2", root=xr,
               reason_class="blocked_on_decision", reason="sync or async?",
               episode_ids=["ep-c"])
@@ -364,11 +389,10 @@ ledger.record("escalation.raised", goal_id="xg", feature_id="f2", root=xr,
 rows = {r["episode_id"]: r for r in build_rows(xr)}
 assert rows["ep-a"]["label"] == "wrong_thing_built", rows["ep-a"]
 assert rows["ep-a"]["phase"] == "intent"          # coherent code, criterion wrong
-assert rows["ep-a"]["heart_reward"] == 0.97       # heart's number survives the join
+assert rows["ep-a"]["episode_outcome"] == "pass"  # heart's verdict survives the join
 assert rows["ep-b"]["label"] == "landed" and rows["ep-b"]["commit"] == "deadbeef"
 assert rows["ep-b"]["phase"] is None              # a landing has no failure phase
 assert rows["ep-c"]["label"] == "blocked"
-assert rows["ep-c"]["heart_reward"] is None       # abstention carries no reward
 assert rows["ep-c"]["attempt"] == 1               # recovered from the task_id
 assert rows["ep-c"]["criterion"] == "pytest tests/f2.py"
 assert all(r["spec_hash"] == "abc123" for r in rows.values())
@@ -379,7 +403,7 @@ assert len(path.read_text().strip().splitlines()) == 3
 
 # --- prune: keeps what `why` and an open escalation still need ---
 # f3 was held and signed off: the next run lands ep-d's diff, so it must survive
-_episode("ep-d", "pass", 0.9, "xg-f3-a1")
+_episode("ep-d", "pass", "xg-f3-a1")
 ledger.record("escalation.raised", goal_id="xg", feature_id="f3", root=xr,
               reason_class="held_for_review", reason="sign off", episode_ids=["ep-d"])
 ledger.record("escalation.resolved", goal_id="xg", feature_id="f3", root=xr,
@@ -397,7 +421,7 @@ prune(xr, days=0, apply=True)
 assert (not (vascular_state.runs_dir(xr) / "ep-b").exists()
         and (vascular_state.runs_dir(xr) / "ep-c").exists())
 
-# prune refuses to delete an episode whose reward was never exported (no
+# prune refuses to delete an episode that was never exported (no
 # labels.jsonl), and --force overrides
 ur = tmp / "unexported-repo"
 (vascular_state.runs_dir(ur) / "ep-x").mkdir(parents=True)
@@ -405,13 +429,11 @@ ur = tmp / "unexported-repo"
 ledger.record("feature.landed", goal_id="g", feature_id="f", root=ur, episode_id="ep-x")
 refused = "\n".join(prune(ur, days=0, apply=True))
 assert "refusing to prune" in refused, refused
-assert (vascular_state.runs_dir(ur) / "ep-x").exists(), "unexported reward must survive without --force"
+assert (vascular_state.runs_dir(ur) / "ep-x").exists(), "an unexported episode must survive without --force"
 prune(ur, days=0, apply=True, force=True)
 assert not (vascular_state.runs_dir(ur) / "ep-x").exists(), "--force deletes anyway"
 
 # --- planner parsing: prose around the JSON must not defeat it ---
-from plexus.plan import _parse_features  # noqa: E402
-
 FEAT = ('[{"id": "a", "title": "t", "spec": "s", "acceptance": "pytest -q",'
         ' "touches": ["src/*"], "contract": []}]')
 # a fenced block wins over bracket-slicing: the trailing sentence here contains
@@ -442,8 +464,6 @@ assert _parse_features(f"```json\n{NO_TOUCHES[:-2]}, \"touches\": [\"src/*\"]}}]
                        f"\n```")[0]["contract"] == []
 
 # --- cost: candidate spend sums across all N, skips unpriced, surfaces in insights ---
-from plexus.run import _episode_cost  # noqa: E402
-
 # two priced candidates + one heart couldn't price (usage None) → sum the priced
 cands = [{"usage": {"cost_usd": 0.10, "tokens_in": 100, "tokens_out": 50}},
          {"usage": {"cost_usd": 0.05, "tokens_in": 40, "tokens_out": 20}},
@@ -462,7 +482,6 @@ assert "cost: $0.2000" in ins and "180 in / 90 out" in ins, ins
 
 # --- _goal_spend: aggregate rollup for budget_exhausted/regression, distinct
 #     spend_* keys so the per-attempt cost summers never double-count it
-from plexus.run import _goal_spend  # noqa: E402
 gs = [{"kind": "feature.started"}, {"kind": "feature.started"},
       {"kind": "feature.failed", "cost_usd": 0.05, "tokens_in": 40, "tokens_out": 20},
       {"kind": "feature.landed", "cost_usd": 0.15, "tokens_in": 140, "tokens_out": 70}]
@@ -475,9 +494,6 @@ assert _goal_spend([{"kind": "feature.started"}]) == {"episodes_total": 1}  # un
 assert "cost_usd" not in _goal_spend(gs), "rollup must avoid the cost_usd key"
 
 # --- amend: rewrites an unlanded feature's criterion, refuses a landed one ---
-from types import SimpleNamespace  # noqa: E402
-from plexus.plan import amend, load_plan, plan_path  # noqa: E402
-
 ar = tmp / "amend-repo"
 vascular_state.plexus_dir(ar).mkdir(parents=True)
 plan_path(ar).write_text("\n".join(json.dumps(p) for p in [
@@ -511,17 +527,10 @@ assert {f["id"] for f in load_plan(ar)} == {"f1", "f2"}, "the project plan must 
 
 # --- control plane: serve.py carries its own demo(); run it here so its proof
 # (ledger->tab state, goal discovery, flock liveness) guards on the normal check ---
-import contextlib
-import io
-
-from plexus import serve  # noqa: E402
-
 with contextlib.redirect_stdout(io.StringIO()):  # demo() prints "ok"; keep our line clean
     serve.demo()
 
 # --- #4 upstream gate: importable symbol passes, missing module/symbol reported
-from plexus.run import _missing_upstream  # noqa: E402
-
 assert _missing_upstream([]) == []
 assert _missing_upstream(["json", "json:loads"]) == []          # stdlib, present
 assert _missing_upstream(["json:nonesuch"]) == ["json:nonesuch"]  # module ok, symbol gone
@@ -543,13 +552,10 @@ assert "rg" in rep and "$  0.3000" in rep and "fleet: $0.3000" in rep, rep
 assert observe.report([tmp / "nonexistent"]) == ["no goals recorded"]
 
 # --- registry: prefix resolution + idempotent cross-repo seeding
-from plexus import registry  # noqa: E402
-import contextlib as _c, io as _io  # noqa: E402
-with _c.redirect_stdout(_io.StringIO()):
+with contextlib.redirect_stdout(io.StringIO()):
     registry.demo()
 
 # seed writes a plannable goal into the owning repo, then load_spec reads it back
-from plexus.spec import load_spec  # noqa: E402
 up = tmp / "up-repo"; up.mkdir()
 seeded = registry.seed_upstream(["heart.x:Y"], "g-down", {"heart": str(up)})
 assert seeded == [("heart.x:Y", str(up))], seeded
@@ -557,7 +563,6 @@ assert load_spec(up).goal_id == "upstream-y"       # scaffolded spec is valid
 assert registry.seed_upstream(["heart.x:Y"], "g-down", {"heart": str(up)}) == []  # idempotent
 
 # --- review hold-gate: held classes escalate before landing, then land once resolved
-from plexus.run import _resolved_hold  # noqa: E402
 hr = tmp / "hold-repo"; vascular_state.plexus_dir(hr).mkdir(parents=True)
 assert _resolved_hold([], "g", "f1") == ""
 ledger.record("escalation.raised", goal_id="g", feature_id="f1", root=hr,
@@ -576,7 +581,6 @@ assert load_spec(rr).pr_base == "main"
 assert load_spec(rr).review_hold == () and load_spec(rr).pr_base == ""
 
 # --- resolve guard: a wrong feature id must not silently no-op (shakeout finding)
-from plexus import cli  # noqa: E402
 rg = tmp / "resolve-repo"; rg.mkdir()
 (rg / "plexus.toml").write_text('[goal]\nid="rgoal"\ntext="t"\n[ground_truth]\nsuite="true"\n')
 ledger.record("escalation.raised", goal_id="rgoal", feature_id="realf", root=rg,
@@ -592,9 +596,6 @@ assert any(r["kind"] == "escalation.resolved" and r["feature_id"] == "realf"
 # thousands of cached tokens. Counting only tokens_in understated every turn;
 # adding cache into it would overcharge reads tenfold. Both are wrong, so the
 # buckets stay separate all the way from heart's event to the dashboard.
-from heart.runner import CACHE_MULTIPLIERS  # noqa: E402
-from plexus.run import _episode_cost  # noqa: E402
-
 eps = [{"usage": {"cost_usd": 0.10, "tokens_in": 15, "tokens_out": 2692,
                   "cache_read": 48_000, "cache_write_5m": 9_000, "cache_write_1h": 3_000}},
        {"usage": {"cost_usd": 0.05, "tokens_in": 10, "tokens_out": 100,
@@ -607,7 +608,6 @@ assert agg["cost_usd"] == 0.15, agg
 assert "cache_read" not in _episode_cost([{"usage": {}}])
 
 # end to end through the dashboard: a synthetic journal, real arithmetic
-import shutil  # noqa: E402
 journal = tmp / "cache-journal"; journal.mkdir()
 prior_journal = os.environ["EVENT_JOURNAL_DIR"]
 os.environ["EVENT_JOURNAL_DIR"] = str(journal)
@@ -861,8 +861,6 @@ def test_the_seat_is_named_by_paths_and_never_read(monkeypatch, tmp_path):
     """Plexus decides whether a run gets a seat; heart decides how it mounts.
     The token stays a path -- a control plane that reads it puts the bytes in
     episode.json, `ps` and the run artifacts."""
-    from plexus import registry
-
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     cred = home / ".claude" / ".credentials.json"
@@ -878,8 +876,6 @@ def test_the_seat_is_named_by_paths_and_never_read(monkeypatch, tmp_path):
 
 
 def test_a_seat_that_is_not_signed_in_contributes_nothing(monkeypatch, tmp_path):
-    from plexus import registry
-
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("HEART_SANDBOX_HOME_FILES", raising=False)
     monkeypatch.delenv("PLEXUS_SEAT", raising=False)
@@ -887,8 +883,6 @@ def test_a_seat_that_is_not_signed_in_contributes_nothing(monkeypatch, tmp_path)
 
 
 def test_a_run_can_be_denied_every_seat(monkeypatch, tmp_path):
-    from plexus import registry
-
     home = tmp_path / "home"
     (home / ".codex").mkdir(parents=True)
     (home / ".codex" / "auth.json").write_text("{}")
@@ -901,8 +895,6 @@ def test_a_run_can_be_denied_every_seat(monkeypatch, tmp_path):
 def test_an_operator_who_named_files_is_left_alone(monkeypatch, tmp_path):
     """Detection is the default, never an override -- same rule the seat *cost*
     already follows in accounting_config."""
-    from plexus import registry
-
     home = tmp_path / "home"
     (home / ".claude").mkdir(parents=True)
     (home / ".claude" / ".credentials.json").write_text("{}")
@@ -917,8 +909,6 @@ def test_the_allowlist_is_no_wider_than_the_box_can_use(monkeypatch, tmp_path):
     vendor hosts for seats that are signed in. A provider with no seat
     contributes no host -- an allowlist wider than the credentials that could
     use it is just a wider allowlist."""
-    from plexus import sandbox
-
     cfg = tmp_path / "config" / "heart"
     cfg.mkdir(parents=True)
     (cfg / "models.json").write_text(json.dumps({"profiles": {
@@ -941,8 +931,6 @@ def test_the_allowlist_is_no_wider_than_the_box_can_use(monkeypatch, tmp_path):
 
 
 def test_no_seat_means_no_vendor_host(monkeypatch, tmp_path):
-    from plexus import sandbox
-
     monkeypatch.setenv("VASCULAR_HOME", str(tmp_path))     # no models.json, no seat
     monkeypatch.delenv("HEART_SANDBOX_ENV", raising=False)
     monkeypatch.setattr("plexus.registry.detect_subscriptions", lambda: {})
@@ -952,8 +940,6 @@ def test_no_seat_means_no_vendor_host(monkeypatch, tmp_path):
 def test_a_routable_egress_network_is_reported_not_tolerated(monkeypatch):
     """--internal is the containment. A network that routes means the agent has
     the open internet and the proxy it was pointed at is decoration."""
-    from plexus import sandbox
-
     monkeypatch.setattr(sandbox.shutil, "which", lambda _n: "/usr/bin/docker")
     monkeypatch.setattr(sandbox, "allowlist", lambda: ["api.anthropic.com"])
     monkeypatch.setattr(sandbox, "local_model_hosts", lambda: [])
@@ -974,7 +960,6 @@ def test_fix_creates_the_network_and_starts_the_proxy(monkeypatch, tmp_path):
     # run it in a scratch dir so the suite never writes into the checkout, which
     # the sandbox verifier mounts read-only
     monkeypatch.chdir(tmp_path)
-    from plexus import sandbox
 
     script = tmp_path / "egress-proxy.py"
     script.write_text("# proxy")
@@ -1031,8 +1016,6 @@ def test_an_injected_seat_is_never_mounted(monkeypatch, tmp_path):
     """With a seat token saved for the proxy, no Claude credential file enters
     a container -- not .credentials.json, and not the 190-project ~/.claude.json
     either. Codex has no injector route yet and keeps its mount."""
-    from plexus import registry
-
     home = _seat_home(monkeypatch, tmp_path, token=True)
     env = registry.seat_env()
     assert env["HEART_SANDBOX_INJECT"] == "anthropic"
@@ -1048,9 +1031,6 @@ def test_a_signed_in_codex_seat_is_injected_not_mounted(monkeypatch, tmp_path):
     """Codex's auth.json is already the file the proxy reads, so a ChatGPT
     seat is injected with no step from the operator: the container gets a
     stand-in carrying only the plan, and the real file never enters it."""
-    import base64
-    from plexus import registry, sandbox
-
     home = _seat_home(monkeypatch, tmp_path, token=False)
     seg = lambda d: base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
     access = ".".join([seg({"alg": "none"}), seg({"exp": 9e9, "https://api.openai.com/auth":
@@ -1074,8 +1054,6 @@ def test_the_sentinel_seed_is_private_stable_and_made_only_when_injecting(monkey
     """The stand-in is worth something only to a container handed it; that
     holds only if the seed is unreadable to anyone else and not recreated
     under running containers."""
-    from plexus import registry
-
     _seat_home(monkeypatch, tmp_path, token=False)
     seed = tmp_path / "vascular" / "secrets" / "heart" / "sentinel"
     registry.seat_env()
@@ -1094,8 +1072,6 @@ def test_the_sentinel_seed_is_private_stable_and_made_only_when_injecting(monkey
 def test_the_dev_environment_rides_along_and_can_be_left_home(monkeypatch, tmp_path):
     """Settings, instructions, skills and plugins go in so a contained agent
     works like the host one; PLEXUS_SEAT=off withholds seats, not conventions."""
-    from plexus import registry
-
     home = _seat_home(monkeypatch, tmp_path, token=False)
     (home / ".claude" / "settings.json").write_text("{}")
     (home / ".claude" / "skills").mkdir()
@@ -1114,8 +1090,6 @@ def test_vendor_hosts_are_port_pinned_and_an_injected_one_is_dropped(monkeypatch
     """A bare name allows every port -- api.anthropic.com:8443 got through the
     live proxy. And an injected seat's host is reached through the injector, so
     listing it for CONNECT would only reopen the foreign-key path."""
-    from plexus import sandbox
-
     _seat_home(monkeypatch, tmp_path, token=False)
     monkeypatch.delenv("HEART_SANDBOX_ENV", raising=False)
     monkeypatch.setattr("plexus.registry.detect_subscriptions",
@@ -1133,7 +1107,6 @@ def test_fix_provisions_a_web_lane_with_its_own_proxy_and_filter(monkeypatch, tm
     # run it in a scratch dir so the suite never writes into the checkout, which
     # the sandbox verifier mounts read-only
     monkeypatch.chdir(tmp_path)
-    from plexus import sandbox
 
     script = tmp_path / "egress-proxy.py"
     script.write_text("# proxy")
@@ -1174,8 +1147,6 @@ def test_acceptance_runs_where_a_verifier_would(monkeypatch, tmp_path):
     """The acceptance command executes the agent's diff. It goes through
     heart's contained runner -- which is the host only when no sandbox was
     asked for -- with a writable throwaway tree."""
-    from plexus import run as _run
-
     seen = []
 
     def fake(command, cwd, timeout, writable=False):
@@ -1203,8 +1174,6 @@ def test_a_contained_planner_keeps_its_memory(tmp_path):
     """The planner's retrieval came from a prompt hook that does not exist in a
     container. The same hook, run on the host with the same prompt, supplies
     it -- and a repo without the hook plans exactly as before."""
-    from plexus.plan import _retrieved
-
     assert _retrieved(tmp_path, "plan it") == ""
     hooks = tmp_path / ".vascular" / "arteries" / "hooks"
     hooks.mkdir(parents=True)
@@ -1220,8 +1189,6 @@ def test_a_diff_that_newly_gains_a_backdoor_capability_is_flagged(tmp_path):
     """Deterministic, so a diff cannot talk it out of what it matches; and only
     what is *new* to the file, so ordinary work in a module that already shells
     out does not hold every feature."""
-    from plexus.review import suspicious
-
     repo = tmp_path / "r"
     (repo / "src").mkdir(parents=True)
     (repo / "src" / "dates.py").write_text("def parse(s):\n    return s\n")
@@ -1251,8 +1218,6 @@ def test_a_diff_that_newly_gains_a_backdoor_capability_is_flagged(tmp_path):
 
 
 def test_a_web_lane_goal_is_reviewed_for_what_the_task_did_not_need(tmp_path):
-    from plexus.run import _roles
-
     (tmp_path / "plexus.toml").write_text('[goal]\nid="g"\ntext="t"\n[ground_truth]\nsuite="true"\n')
     spec = load_spec(tmp_path)
     assert spec.pipeline, "a web-lane goal gets a reviewer by default"
@@ -1266,8 +1231,6 @@ def test_a_web_lane_goal_is_reviewed_for_what_the_task_did_not_need(tmp_path):
 def test_a_new_goal_starts_on_the_open_web_only_if_its_repo_is_public(tmp_path, monkeypatch):
     """Unknown is private: a repo with no remote, no gh or no answer starts on
     the api lane, where the repo has nowhere to go but the model."""
-    from plexus import spec as _spec
-
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     _spec.init(tmp_path)
     assert load_spec(tmp_path).network == "api"
@@ -1286,8 +1249,6 @@ def test_a_goal_gets_the_web_lane_unless_it_says_otherwise(tmp_path):
 
 
 def test_a_diff_that_would_run_on_the_host_is_held_whatever_the_plan_said():
-    from plexus.review import exec_surface
-
     assert exec_surface([".claude/settings.json", "src/app.py", "tests/unit/conftest.py",
                          "pyproject.toml", "web/package.json", ".github/workflows/ci.yml",
                          "lib/evil.pth", "docs/guide.md"]) == [
@@ -1299,7 +1260,6 @@ def test_a_diff_that_would_run_on_the_host_is_held_whatever_the_plan_said():
 # --- a task that needs no plan gets a one-feature one, approved, and runs ---
 # Before this, `requires_plan: false` produced a task the board called runnable
 # and the runner refused: there was no path that ever wrote its plan file.
-from plexus import plan as _plan, serve as _serve, tasks as _tasks  # noqa: E402
 ap = tmp / "auto-plan-repo"; ap.mkdir()
 (ap / "plexus.toml").write_text(
     '[goal]\nid="apgoal"\ntext="t"\n[ground_truth]\nsuite="python3 -m pytest -q"\n')
@@ -1327,7 +1287,6 @@ except SystemExit as exc:
 
 
 # --- recordings read back as lines: a repaint is one line, not two
-from plexus import tap as _tap, translog as _translog  # noqa: E402
-with _c.redirect_stdout(_io.StringIO()):
+with contextlib.redirect_stdout(io.StringIO()):
     _translog.demo()
     _tap.demo()

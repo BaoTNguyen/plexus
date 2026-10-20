@@ -29,18 +29,17 @@ from __future__ import annotations
 import inspect
 import os
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from heart.detect import detect_verifiers
 from heart.env import Workspace
-from heart.episode import best_episode, run_candidates
+from heart.episode import DEFAULT_ROLES, best_episode, run_candidates, run_episode
 from heart.orchestrate import run_orchestrated
 from heart.routing import TIERS, resolve
 from heart.runner import CACHE_MULTIPLIERS, resolve_model
-from heart.taskspec import TaskSpec
+from heart.taskspec import TaskSpec, Verifier
 
 BUGGY = "def add(a, b):\n    return a - b\n"
 TEST = (
@@ -136,9 +135,8 @@ class TestHeartApiPin(unittest.TestCase):
                 timeout_seconds=120)
             ep = run_orchestrated(task, agent="shell", runs_dir=str(root / "runs"),
                                   manifest={})
-        for key in ("episode_id", "outcome", "review_verdict", "reward", "usage"):
+        for key in ("episode_id", "outcome", "review_verdict", "diff_lines", "usage"):
             self.assertIn(key, ep, f"Path B result is missing {key!r}")
-        self.assertIn("total", ep["reward"])
         self.assertIsInstance(ep["usage"], dict)
         # best_episode must be able to rank a Path-B result alongside Path A
         self.assertIs(best_episode([ep]), ep)
@@ -171,7 +169,6 @@ class TestHeartApiPin(unittest.TestCase):
     def test_pipeline_symbols(self):
         # run.py: from heart.episode import DEFAULT_ROLES, best_episode, run_candidates
         # and passes roles=DEFAULT_ROLES into run_candidates.
-        from heart.episode import DEFAULT_ROLES, run_episode
         self.assertTrue(DEFAULT_ROLES and
                         all("name" in r and "prompt" in r for r in DEFAULT_ROLES),
                         "DEFAULT_ROLES lost its {name,prompt} shape plexus relies on")
@@ -248,8 +245,6 @@ class TestHeartApiPin(unittest.TestCase):
                 # look for tests/ or test_*.py) won't catch this single-file
                 # toy repo's unittest module, so pin an explicit verifier the
                 # way heart's own toy fixture does.
-                from heart.taskspec import Verifier
-
                 task = TaskSpec(
                     task_id="plexus-pin-toy",
                     repo_path=repo,

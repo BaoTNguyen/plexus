@@ -37,6 +37,8 @@ from pathlib import Path
 from queue import Empty
 from urllib.parse import parse_qs, urlparse
 
+import heart.events as he
+from heart.pulse import load_events
 from heart.runner import CACHE_MULTIPLIERS, speed_multiplier
 
 from . import diagnose, ledger, observe, overview, registry, review, tasks, term, translog
@@ -187,7 +189,7 @@ def _goal_lifecycle(root: Path) -> dict:
                         for r in goal_recs)
     delivery = next((str(r.get("result", "")) for r in reversed(goal_recs)
                      if r.get("kind") == "delivery.requested"), "")
-    open_escalations = _open_escalations(recs, spec.goal_id)
+    open_escalations = ledger.open_escalations(recs, spec.goal_id)
     if _running(root):
         state = "running"
     elif job["running"] and job["kind"] == "plan":
@@ -281,24 +283,6 @@ def _running(root: Path) -> bool:
         return True
     finally:
         f.close()
-
-
-def _open_escalations(recs: list[dict], goal_id: str) -> list[dict]:
-    """Per feature, raised minus resolved > 0 -> open, carrying the latest
-    reason. Mirrors observe.status's counting so the two never disagree."""
-    by_feat: dict[str, list[dict]] = {}
-    for r in recs:
-        if r.get("goal_id") == goal_id and r.get("feature_id"):
-            by_feat.setdefault(r["feature_id"], []).append(r)
-    out = []
-    for fid, rs in by_feat.items():
-        raised = [r for r in rs if r["kind"] == "escalation.raised"]
-        if len(raised) - sum(r["kind"] == "escalation.resolved" for r in rs) > 0:
-            last = raised[-1]
-            out.append({"feature_id": fid,
-                        "reason_class": last.get("reason_class", "?"),
-                        "reason": last.get("reason", "")})
-    return out
 
 
 def _fleet_state(server) -> dict:
@@ -553,7 +537,7 @@ def _goal_detail(root: Path) -> dict:
             "status": " · ".join(observe.status(str(root))[0]),
             "insights": observe.insights(str(root)),
             "features": features,
-            "escalations": _open_escalations(recs, goal_id),
+            "escalations": ledger.open_escalations(recs, goal_id),
             "activity": activity,
             "why": diagnose.why(str(root))}
 
@@ -566,7 +550,7 @@ def _short(v, n: int = 70) -> str:
 def _event_detail(kind: str, payload: dict) -> str:
     """The salient bit of a spine event for the live log — the fields you'd want
     to see scroll by while an agent works, else a compact head of the payload."""
-    salient = [k for k in ("role", "tool", "command", "outcome", "reward", "passed",
+    salient = [k for k in ("role", "tool", "command", "outcome", "passed",
                            "verifier", "reason_class", "reason", "message", "status",
                            "outcome", "cost_usd", "attempt", "chosen", "mode")
                if k in payload]
@@ -578,14 +562,10 @@ def _live(root: Path, limit: int = 60) -> list[dict]:
     """The goal's live activity: spine events across the whole stack, filtered to
     this goal's lineage (plexus stamps task_id `<goal>-<feature>-a<n>`, and heart
     stamps payload.goal_id), newest last so it reads like a tail. This is the
-    'watch it work' surface — role turns, verifier rounds, rewards, retrieval —
+    'watch it work' surface — role turns, verifier rounds, retrieval —
     that the ledger (coarse, durable) deliberately doesn't carry.
     ponytail: full-journal scan per poll; prune by day-file if it ever drags."""
     goal_id = _goal_id(root)
-    try:  # lazy: heart may be absent; an empty live view is the fallback
-        from heart.pulse import load_events
-    except Exception:
-        return []
     pref = goal_id + "-"
     out = []
     for e in load_events():
@@ -606,10 +586,6 @@ def _live(root: Path, limit: int = 60) -> list[dict]:
 def _spine_events(root: Path) -> list[dict]:
     """Raw spine events belonging to one goal, oldest first."""
     goal_id = _goal_id(root)
-    try:  # lazy: heart may be absent; an empty list is the fallback
-        from heart.pulse import load_events
-    except Exception:
-        return []
     pref = goal_id + "-"
     return [e for e in load_events()
             if str(e.get("task_id") or "").startswith(pref)
@@ -760,7 +736,7 @@ def _dashboard(roots: list[Path], window_h: float = 24.0, base: Path | None = No
                 plexus_spend_7d += cost
                 landed_7d += rec.get("kind") == "feature.landed"
         plexus_spend_24h += project_24h
-        for escalation in _open_escalations(recs, project["goal_id"]):
+        for escalation in ledger.open_escalations(recs, project["goal_id"]):
             alerts.append({**escalation, "severity": "blocked",
                            "project_id": project["project_id"],
                            "goal_id": project["goal_id"]})
@@ -820,8 +796,7 @@ def _fleet_telemetry(roots: list[Path], cutoff: str, cutoff_7d: str,
     # keep whichever reaches further back: the selected window may be a year,
     # and the 7-day figures still have to come out of the same list
     retain_cutoff = min(cutoff, cutoff_7d)
-    try:  # lazy: heart may be absent; accounting degrades rather than fails
-        from heart.pulse import load_events
+    try:  # an unreadable journal degrades accounting rather than failing it
         history = load_events()
         retained = [event for event in history
                     if event.get("ts", "") >= retain_cutoff]
@@ -1233,7 +1208,7 @@ def _goal_run_state(root: Path) -> str:
     same source `plexus status` reads."""
     recs = ledger.read(root)
     gid = _goal_id(root)
-    if _open_escalations(recs, gid):
+    if ledger.open_escalations(recs, gid):
         return "escalated"
     try:
         plan = load_plan(root)
@@ -1837,9 +1812,11 @@ class _Handler(BaseHTTPRequestHandler):
             elif u.path == "/api/stop":
                 _stop(root)
             elif u.path == "/api/resolve":
-                ledger.record("escalation.resolved", goal_id=_goal_id(root),
-                              feature_id=data["feature"], root=root,
-                              resolution=data.get("answer", "resolved"))
+                open_ids = ledger.resolve(root, _goal_id(root), data["feature"],
+                                          data.get("answer", "resolved"))
+                if open_ids is not None:
+                    return self._json({"error": f"no open escalation for {data['feature']!r}",
+                                       "open": open_ids}, 409)
             else:
                 return self._json({"error": "not found"}, 404)
         except (ValueError, TypeError, OSError, tomllib.TOMLDecodeError) as e:
@@ -2220,8 +2197,7 @@ def demo() -> None:
 
         # live view: spine events filtered to this goal's lineage, both paths
         # (task_id prefix and payload.goal_id), isolated journal
-        # lazy: the self-check emits into an isolated journal; heart only here
-        import heart.events as he
+        # the self-check emits into an isolated journal
         old_sp = os.environ.get("EVENT_JOURNAL_DIR")
         os.environ["EVENT_JOURNAL_DIR"] = str(root / "livejournal")
         try:

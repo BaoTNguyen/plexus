@@ -213,22 +213,6 @@ def _symbol_delta(repo: str | Path, commit: str,
     return added, removed
 
 
-def added_symbols(repo: str | Path, commit: str, paths: list[str]) -> set[str]:
-    """Public top-level names this commit introduced."""
-    return _symbol_delta(repo, commit, paths)[0]
-
-
-def removed_symbols(repo: str | Path, commit: str, paths: list[str]) -> set[str]:
-    """Public top-level names this commit deleted or renamed away.
-
-    The mirror of `added_symbols`, and the more urgent half: an unplanned export
-    is clutter, an unplanned deletion is a caller somewhere that no longer
-    resolves. In this stack that caller is often in another repo — plexus imports
-    heart by name — so a removal nothing declared is the failure mode the pin
-    test exists to catch, seen one step earlier."""
-    return _symbol_delta(repo, commit, paths)[1]
-
-
 def _declared(feat: dict) -> set[str]:
     """Contract entries reduced to bare symbol names: `review.report(x) -> str`
     and `class Foo` both have to match what the AST actually sees."""
@@ -315,16 +299,76 @@ def preview(root: str | Path = ".") -> str:
     return "\n".join(lines)
 
 
-def _cross_repo_diff_paths(repo: str | Path, diff: str) -> list[str]:
-    """Same trick as run.py's `_diff_paths` (not imported: run.py imports this
-    module, and the other direction would be a cycle) -- `git apply --numstat`
-    parses a patch without touching the working tree."""
+def diff_paths(repo: str | Path, diff: str, strict: bool = True) -> list[str]:
+    """Every path a diff touches, per git itself. `git apply --numstat -z`
+    parses the patch without changing anything and prints names raw; without
+    -z a non-ASCII name comes back C-quoted and `git add` cannot find it. Even
+    with -z a rename reports only its destination, so the source comes from
+    the patch's own `rename from` header: landing a rename has to stage the
+    deletion too. Lives here, not in run.py, because run imports review.
+
+    strict=False answers [] for a diff git cannot parse, for callers that
+    treat "unknown" as "nothing to check"."""
     try:
-        r = subprocess.run(["git", "-C", str(repo), "apply", "--numstat", "-"],
+        r = subprocess.run(["git", "-C", str(repo), "apply", "--numstat", "-z", "-"],
                            input=diff, text=True, capture_output=True, check=True)
     except (subprocess.CalledProcessError, OSError):
+        if strict:
+            raise
         return []
-    return [line.split("\t", 2)[2] for line in r.stdout.splitlines() if "\t" in line]
+    paths = [rec.split("\t", 2)[2] for rec in r.stdout.split("\0") if rec.count("\t") >= 2]
+    paths += [_unquote(p) for p in re.findall(r"(?m)^rename from (.+)$", diff)]
+    return list(dict.fromkeys(paths))
+
+
+def trust_boundary(diff: str, entries: tuple[str, ...]) -> list[str]:
+    """The `[review] boundary` entries a diff touches: `path` globs, or
+    `path::function` for a boundary that lives inside a busier file (heart's
+    `_sandbox_profiles` decides what env reaches a container, in episode.py,
+    which changes all the time). cross_repo_callers only sees names other repos
+    import; what reaches a sandbox is a trust boundary whether or not anyone
+    imports it.
+
+    A function counts as touched when a hunk's header names it (git's
+    enclosing-function context) or a changed line is its `def`.
+    ponytail: git's default funcname heuristic, so a hunk deep in a nested
+    function reports the nearest unindented line above it; a top-level def is
+    what the entries name, and that is what it finds."""
+    if not entries:
+        return []
+    touched: dict[str, set[str]] = {}
+    current = None
+    for line in diff.splitlines():
+        if line.startswith("+++ ") or line.startswith("--- "):
+            target = line[4:].strip()
+            if target.startswith(("a/", "b/")):
+                current = _unquote(target)[2:]
+                touched.setdefault(current, set())
+            continue
+        if current is None:
+            continue
+        if line.startswith("@@"):
+            if m := re.search(r"@@[^@]*@@\s*(?:async\s+)?(?:def|class)\s+(\w+)", line):
+                touched[current].add(m.group(1))
+        elif line[:1] in "+-":
+            if m := re.match(r"[+-]\s*(?:async\s+)?(?:def|class)\s+(\w+)", line):
+                touched[current].add(m.group(1))
+    hits = []
+    for entry in entries:
+        glob, _, symbol = entry.partition("::")
+        for path, names in touched.items():
+            if _matches(path, glob) and (not symbol or symbol in names):
+                hits.append(entry)
+                break
+    return hits
+
+
+def _unquote(path: str) -> str:
+    """Undo git's C-quoting of a header path (`"caf\\303\\251.md"`)."""
+    if not (path.startswith('"') and path.endswith('"')):
+        return path
+    return (path[1:-1].encode("latin-1", "backslashreplace").decode("unicode_escape")
+            .encode("latin-1").decode("utf-8"))
 
 
 def _diff_file_patches(diff: str) -> dict[str, str]:
@@ -427,7 +471,7 @@ def cross_repo_callers(repo: str | Path, base: str, diff: str) -> list[str]:
         if not pkgs:
             return []
         patches = _diff_file_patches(diff)
-        touched = set(_cross_repo_diff_paths(repo_path, diff)) & set(patches)
+        touched = set(diff_paths(repo_path, diff, strict=False)) & set(patches)
         prefix = f"{pkg_base}/" if pkg_base else ""
         changed: set[str] = set()
         for path in touched:

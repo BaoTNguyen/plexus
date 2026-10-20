@@ -12,6 +12,8 @@ plexus's own events.
 """
 from __future__ import annotations
 
+import hashlib
+
 from heart.events import emit as _emit
 
 SOURCE = "plexus"
@@ -19,6 +21,16 @@ SOURCE = "plexus"
 
 def make_task_id(goal_id: str, feature_id: str, attempt: int) -> str:
     return f"{goal_id}-{feature_id}-a{attempt}"
+
+
+def trace_for(plan_id: str) -> str:
+    return hashlib.sha256(f"plexus:{plan_id}".encode("utf-8")).hexdigest()[:32]
+
+
+def attempt_span(plan_id: str, feature_id: str, attempt: int) -> str:
+    return hashlib.sha256(
+        f"plexus:{plan_id}:{feature_id}:{attempt}".encode("utf-8")
+    ).hexdigest()[:16]
 
 
 def emit(
@@ -29,6 +41,9 @@ def emit(
     task_id: str | None = None,
     episode_id: str | None = None,
     duration_ms: int | None = None,
+    span_id: str | None = None,
+    parent_span_id: str | None = None,
+    trace_id: str | None = None,
     **payload,
 ) -> None:
     if goal_id:
@@ -36,4 +51,5 @@ def emit(
     if feature_id:
         payload["feature_id"] = feature_id
     _emit(SOURCE, kind, task_id=task_id, episode_id=episode_id,
-          duration_ms=duration_ms, **payload)
+          duration_ms=duration_ms, span_id=span_id,
+          parent_span_id=parent_span_id, trace_id=trace_id, **payload)

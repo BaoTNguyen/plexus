@@ -63,7 +63,7 @@ def test_a_refusal_becomes_a_directory_the_next_attempt_can_write(root):
 
 
 def test_a_probe_never_becomes_a_permission(root):
-    """The reward hack this closes: reach past the boundary often enough and the
+    """The escape hatch this closes: reach past the boundary often enough and the
     boundary moves. A caught probe is evidence the prohibition works."""
     with tempfile.TemporaryDirectory() as j:
         _journal(Path(j), _probed("t1", "src/secrets"))

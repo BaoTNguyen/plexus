@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import datetime
 import os
-import re
 import tempfile
 from pathlib import Path
 
@@ -152,11 +151,6 @@ def assets(root: str | Path = ".") -> list[str]:
     return sorted(set(found))[:200]
 
 
-def mermaid_blocks(text: str) -> list[str]:
-    """Diagram sources in a section, for a renderer that loads lazily."""
-    return re.findall(r"```mermaid\n(.*?)```", text, re.DOTALL)
-
-
 def demo() -> None:
     """Self-check: round-trip, empty sections stay listed, planner context skips
     blanks, and an unknown key is refused rather than writing outside the dir."""
@@ -174,7 +168,6 @@ def demo() -> None:
         assert again["system-architecture"]["updated"], "no mtime recorded"
         assert "## System architecture" in as_context(root)
         assert "## Product review" not in as_context(root), "empty section leaked"
-        assert mermaid_blocks(body) == ["graph TD; a-->b;\n"], mermaid_blocks(body)
 
         # a traversal key must not escape the overview directory
         for bad in ("../../etc/passwd", "nope", ""):
