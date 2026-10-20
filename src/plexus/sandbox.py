@@ -511,6 +511,29 @@ def _baked_heart_drift() -> str | None:
     return baked_heart_drift(IMAGE)
 
 
+def _rebuild_image(say) -> bool:
+    """Run the operator's HEART_SANDBOX_REBUILD command; True if it succeeded.
+
+    Only heart drift is rebuilt automatically, never a stale Dockerfile: drift
+    means same recipe, newer source, and a failed build leaves the old tag in
+    place. Without it every held heart feature cost a hand rebuild, because the
+    commit plexus had just landed was itself the drift (F87)."""
+    cmd = os.environ.get("HEART_SANDBOX_REBUILD", "")
+    if not cmd:
+        return False
+    say(f"image {IMAGE}: heart drifted -- rebuilding with HEART_SANDBOX_REBUILD")
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=1800)
+    except subprocess.TimeoutExpired:
+        say("  rebuild timed out after 30 min")
+        return False
+    if r.returncode:
+        tail = (r.stderr or r.stdout).strip().splitlines()[-1:] or [""]
+        say(f"  rebuild failed (exit {r.returncode}): {tail[0]}")
+        return False
+    return True
+
+
 class SandboxNotReady(RuntimeError):
     """ensure() found no running sandbox state it could restore without
     provisioning secrets or changing a running proxy's settings -- those are
@@ -600,8 +623,12 @@ def ensure() -> list[str]:
     # unlike a stale recipe, a drifted heart is certain to mislead: verifiers
     # import the image's heart, so every episode would be judged by old code
     drift = _baked_heart_drift()
+    if drift and _rebuild_image(say):
+        drift = _baked_heart_drift()
     if drift:
-        stop(f"image {IMAGE}: {drift}")
+        hint = ("" if os.environ.get("HEART_SANDBOX_REBUILD") else
+                "\n  set HEART_SANDBOX_REBUILD to a build command to rebuild automatically")
+        stop(f"image {IMAGE}: {drift}{hint}")
     if not stale:
         say(f"image {IMAGE}: ok")
 
