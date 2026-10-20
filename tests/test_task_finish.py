@@ -2,7 +2,7 @@
 landed (not the last episode's id), and the PR step only refreshes an OPEN PR."""
 import subprocess
 
-from plexus import ledger
+from plexus import ledger, review, tasks
 from plexus import run as run_mod
 from test_sandbox_start_retry import _FEAT, _add_diff, _episode, _make_repo, _spec, _write_plan
 
@@ -63,3 +63,17 @@ def test_an_open_pr_is_refreshed(monkeypatch, tmp_path):
     assert any(c[:3] == ["gh", "pr", "edit"] for c in calls)
     assert not any(c[:3] == ["gh", "pr", "create"] for c in calls)
     assert "pull/7" in note
+
+
+def test_the_pr_is_titled_for_the_tasks_it_lands(tmp_path):
+    """#11 went up as "plexus: plexus", body listing every goal ever run."""
+    a = tasks.create(tmp_path, "Trace each plan")["id"]
+    b = tasks.create(tmp_path, "Hold boundary diffs")["id"]
+    for fid, commit in [(f"old:f", "c0"), (f"{a}:f1", "c1"), (f"{a}:f2", "c2"), (f"{b}:f1", "c3")]:
+        ledger.record("feature.landed", goal_id="g1", feature_id=fid, root=tmp_path, commit=commit)
+    spec = _spec(pr_base="main")
+    assert run_mod._pr_title(spec, tmp_path, {"c1", "c2"}) == "Trace each plan"
+    assert run_mod._pr_title(spec, tmp_path, {"c2", "c3"}) == "Trace each plan (+1 more)"
+    assert run_mod._pr_title(spec, tmp_path, set()) == "plexus: g1"
+    assert run_mod._pr_title(spec, tmp_path, None) == "plexus: g1"
+    assert [r["feature_id"] for r in review.rows(spec, tmp_path, tmp_path, {"c3"})] == [f"{b}:f1"]

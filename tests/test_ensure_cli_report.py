@@ -4,6 +4,7 @@ change from ensure() prints as a `sandbox: ` line telling the operator to run
 ensure() finds no workable state at all. docker is stubbed throughout --
 real credential/TLS/proxy-setting inputs are faked, never a container.
 """
+import subprocess
 import time
 
 import pytest
@@ -155,7 +156,45 @@ def test_run_refuses_an_image_whose_baked_heart_drifted(monkeypatch, tmp_path, c
     rc = cli.main(["run", "--root", str(tmp_path)])
 
     assert rc == 1
-    assert any("bakes heart abc" in l for l in _sandbox_lines(capsys))
+    out = capsys.readouterr()
+    assert "bakes heart abc" in out.out + out.err
+    assert "HEART_SANDBOX_REBUILD" in out.out + out.err
+
+
+def _drifted_until_rebuilt(monkeypatch, build_rc):
+    """Drift that a successful HEART_SANDBOX_REBUILD clears (F87)."""
+    monkeypatch.setattr(registry, "injected_seats", lambda: set())
+    monkeypatch.setattr(registry, "detect_subscriptions", lambda: {})
+    monkeypatch.setattr(sandbox, "lanes", lambda: [])
+    built = []
+    monkeypatch.setattr(sandbox, "_baked_heart_drift",
+                        lambda: None if built else "sandbox image 'x' bakes heart abc")
+    monkeypatch.setenv("HEART_SANDBOX_REBUILD", "build-it")
+
+    def fake_run(cmd, **kw):
+        assert cmd == "build-it" and kw.get("shell")
+        if build_rc == 0:
+            built.append(cmd)
+        return subprocess.CompletedProcess(cmd, build_rc, "", "no space left on device")
+
+    monkeypatch.setattr(sandbox.subprocess, "run", fake_run)
+    _stub_docker(monkeypatch, {})
+
+
+def test_run_rebuilds_a_drifted_image_and_goes_on(monkeypatch, tmp_path, capsys):
+    _drifted_until_rebuilt(monkeypatch, 0)
+
+    assert cli.main(["run", "--root", str(tmp_path)]) == 0
+    assert any("rebuilding with HEART_SANDBOX_REBUILD" in l for l in _sandbox_lines(capsys))
+
+
+def test_run_still_refuses_when_the_rebuild_fails(monkeypatch, tmp_path, capsys):
+    _drifted_until_rebuilt(monkeypatch, 1)
+
+    assert cli.main(["run", "--root", str(tmp_path)]) == 1
+    out = capsys.readouterr()
+    assert "rebuild failed (exit 1): no space left on device" in out.out + out.err
+    assert "bakes heart abc" in out.out + out.err
 
 
 @pytest.mark.parametrize("cmd", ["plan", "approve", "run"])

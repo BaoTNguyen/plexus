@@ -599,8 +599,9 @@ def _open_pr(spec, root: Path, repo: str) -> str:
             return "no git remote: landed locally, no PR"
         subprocess.run(["git", "-C", repo, "push", "-u", "origin", branch],
                        capture_output=True, text=True, check=True, timeout=120)
+        pending = _unmerged(repo, spec.pr_base)
         body = ("Opened by `plexus run` for goal `" + spec.goal_id + "`.\n\n"
-                "## What to read\n\n```\n" + report(spec, root, repo) + "\n```\n")
+                "## What to read\n\n```\n" + report(spec, root, repo, pending) + "\n```\n")
         # only an OPEN PR is ours to refresh: `gh pr view <branch>` also
         # returns the branch's last merged one, and editing that rewrote a
         # merged PR's description instead of opening a new PR
@@ -613,7 +614,7 @@ def _open_pr(spec, root: Path, repo: str) -> str:
             return f"PR updated: {view.stdout.strip()}"
         made = subprocess.run(
             ["gh", "pr", "create", "--base", spec.pr_base, "--head", branch,
-             "--title", f"plexus: {spec.goal_id}", "--body", body],
+             "--title", _pr_title(spec, root, pending), "--body", body],
             cwd=repo, capture_output=True, text=True, timeout=120)
         if made.returncode != 0:
             return f"could not open PR: {(made.stderr or made.stdout).strip()[-300:]}"
@@ -622,6 +623,31 @@ def _open_pr(spec, root: Path, repo: str) -> str:
         return "gh CLI not installed: pushed nothing, landed locally"
     except Exception as exc:
         return f"could not open PR: {exc}"
+
+
+def _unmerged(repo: str, base: str) -> set[str] | None:
+    """Commits on HEAD that origin/<base> lacks, or None if it can't be read."""
+    try:
+        return set(_git(repo, "rev-list", f"origin/{base}..HEAD").split())
+    except Exception:
+        return None
+
+
+def _pr_title(spec, root: Path, pending: set[str] | None) -> str:
+    """Name the PR for the tasks it lands. `plexus: <goal>` named every PR from
+    a repo the same, and #11 went up as "plexus: plexus"."""
+    fallback = f"plexus: {spec.goal_id}"
+    if pending is None:
+        return fallback
+    ids = list(dict.fromkeys(
+        r["feature_id"].split(":")[0] for r in ledger.read(root)
+        if r["kind"] == "feature.landed" and r.get("goal_id") == spec.goal_id
+        and r.get("commit") in pending and ":" in r.get("feature_id", "")))
+    if not ids:
+        return fallback
+    titles = {t["id"]: t.get("title") or t["id"] for t in _tasks.read(root)}
+    first = titles.get(ids[0], ids[0])
+    return first + (f" (+{len(ids) - 1} more)" if len(ids) > 1 else "")
 
 
 def _feature_prompt(spec, feat: dict, retry_context: dict) -> str:
