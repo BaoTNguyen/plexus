@@ -159,3 +159,22 @@ def test_solo_mode_unreviewed_still_lands(monkeypatch, repo):
     assert code == 0
     assert any(r["kind"] == "feature.landed" for r in recs)
     assert not any(r["kind"] == "escalation.raised" for r in recs)
+
+
+def test_land_commits_only_the_diff_not_the_users_edits_in_the_same_file(tmp_path):
+    repo = _make_repo(tmp_path)
+    (repo / "README.md").write_text("a\nb\nc\nd\ne\nf\ng\n")
+    _git(repo, "commit", "-qam", "lines")
+    (repo / "README.md").write_text("a\nb\nc\nd\ne\nf\nG\n")
+    diff = subprocess.run(["git", "-C", str(repo), "diff"], capture_output=True, text=True).stdout
+    _git(repo, "checkout", "--", "README.md")
+    (repo / "README.md").write_text("A-user-edit\nb\nc\nd\ne\nf\ng\n")  # uncommitted, same file
+
+    run_mod._land(repo, diff, "g:f")
+
+    show = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True,
+                                     text=True, check=True).stdout
+    assert show("show", "HEAD:README.md") == "a\nb\nc\nd\ne\nf\nG\n"
+    assert (repo / "README.md").read_text() == "A-user-edit\nb\nc\nd\ne\nf\nG\n"
+    assert show("diff", "--cached") == ""
+    assert "A-user-edit" in show("diff")

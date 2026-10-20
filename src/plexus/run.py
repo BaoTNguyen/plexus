@@ -23,6 +23,7 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -563,15 +564,24 @@ def _stray_paths(paths: list[str], touches: list[str] | None) -> list[str]:
 
 
 def _land(repo: str | Path, diff: str, feature_id: str) -> str:
-    """Commit exactly the paths the diff touched — never `add -A`. The goal repo
-    is a real working tree: it holds the user's unrelated edits and plexus's own
-    `.vascular/plexus/runs/` episode dumps, and a blanket add would sweep both into the feature
-    commit and into the goal's history."""
+    """Commit exactly the diff -- never `add -A`, and never the whole of a file it
+    touched. The goal repo is a real working tree: it holds the user's unrelated
+    edits, sometimes in the very files the diff touches, and plexus's own
+    `.vascular/plexus/runs/` episode dumps. A pathspec commit takes a touched file
+    whole, edits and all, so the commit is built from HEAD plus the diff in a
+    scratch index instead."""
     paths = diff_paths(repo, diff)
+    # working tree first: a clash with the user's edits stops here, before any commit
     subprocess.run(["git", "-C", str(repo), "apply", "--whitespace=nowarn"],
                    input=diff, text=True, capture_output=True, check=True)
-    _git(repo, "add", "--", *paths)  # tracks new files so the pathspec commit sees them
-    _git(repo, "commit", "-m", f"plexus: land {feature_id}", "--no-verify", "--", *paths)
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(tmp) / "index")}
+        for args, stdin in ((["read-tree", "HEAD"], None),
+                            (["apply", "--cached", "--whitespace=nowarn"], diff),
+                            (["commit", "-q", "--no-verify", "-m", f"plexus: land {feature_id}"], None)):
+            subprocess.run(["git", "-C", str(repo), *args], input=stdin, env=env,
+                           text=True, capture_output=True, check=True)
+    _git(repo, "reset", "-q", "--", *paths)  # the real index still holds the pre-land blobs
     return _head(repo)
 
 
