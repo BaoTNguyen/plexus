@@ -50,8 +50,12 @@ def record(
     goal_id: str,
     feature_id: str | None = None,
     root: str | Path = ".",
+    operator: bool = False,
     **detail,
 ) -> dict:
+    """`operator`: a person did this (approve, amend, resolve, merge, manual
+    validation). Its event carries origin=operator, which is how pulse counts
+    my attention per landed feature (F29)."""
     rec: dict = {
         "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "kind": kind,
@@ -59,6 +63,8 @@ def record(
     }
     if feature_id:
         rec["feature_id"] = feature_id
+    if operator:
+        rec["operator"] = True
     rec.update(detail)
     path = ledger_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -66,7 +72,8 @@ def record(
         f.write(json.dumps(rec, default=str) + "\n")
         f.flush()
         os.fsync(f.fileno())
-    events.emit(kind, goal_id=goal_id, feature_id=feature_id, **detail)
+    events.emit(kind, goal_id=goal_id, feature_id=feature_id,
+                origin="operator" if operator else None, **detail)
     if kind in _NOTIFY_ON:
         _notify(root, rec)
     return rec
@@ -133,5 +140,5 @@ def resolve(root: str | Path, goal_id: str, feature_id: str, answer: str) -> lis
     if feature_id not in open_ids:
         return open_ids
     record("escalation.resolved", goal_id=goal_id, feature_id=feature_id, root=root,
-           resolution=answer)
+           resolution=answer, operator=True)
     return None

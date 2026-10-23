@@ -233,6 +233,16 @@ def insights(root: str = ".") -> list[str]:
     if phases:
         lines.append("failures by phase: " + " ".join(
             f"{p}={phases[p]}" for p in ("intent", "coding", "testing") if phases[p]))
+    # my attention per landed feature (F29): every operator action counts,
+    # landed features counted over the same span, since the flag began
+    acts = [r for r in recs if r.get("operator")]
+    if acts:
+        since = acts[0]["ts"]
+        landed = sum(r["kind"] == "feature.landed" and r["ts"] >= since for r in recs)
+        per = f"{len(acts) / landed:.1f} per landed feature" if landed else "nothing landed yet"
+        lines.append(f"attention: {len(acts)} operator action(s) since {since[:10]}, {per} ("
+                     + " ".join(f"{k}={n}" for k, n in Counter(r["kind"] for r in acts).items())
+                     + ")")
     return lines
 
 
