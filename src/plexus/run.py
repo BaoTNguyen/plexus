@@ -22,8 +22,11 @@ import importlib
 import os
 import re
 import shlex
+import signal
 import subprocess
+import sys
 import tempfile
+import threading
 import tomllib
 from pathlib import Path
 
@@ -822,7 +825,26 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path | None = None,
     if task_id:
         _tasks.update(root, task_id, state="running", error="")
         print(f"task {task_id}")
-    code = _walk(spec, root, runs_dir, candidates, task_id)
+    # Stop sends SIGTERM; as SystemExit it unwinds through the handler below
+    # instead of killing us with the task still `running` (PLEXUS-B02)
+    main = threading.current_thread() is threading.main_thread()
+    if main:
+        prev_term = signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    try:
+        code = _walk(spec, root, runs_dir, candidates, task_id)
+    except BaseException as e:
+        # a `running` task makes next_task() return None forever, so any way out
+        # of the walk that isn't a return has to put the task somewhere visible
+        if task_id:
+            why = f"run ended without finishing: {type(e).__name__}: {e}"
+            try:
+                _tasks.update(root, task_id, state="blocked", error=why[:500])
+            except ValueError:
+                pass
+        raise
+    finally:
+        if main:
+            signal.signal(signal.SIGTERM, prev_term or signal.SIG_DFL)
     if code == 1 and task_id:
         _mark_blocked(root, task_id, ledger.read(root), spec.goal_id)
     return code

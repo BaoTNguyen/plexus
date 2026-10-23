@@ -77,3 +77,22 @@ def test_the_pr_is_titled_for_the_tasks_it_lands(tmp_path):
     assert run_mod._pr_title(spec, tmp_path, set()) == "plexus: g1"
     assert run_mod._pr_title(spec, tmp_path, None) == "plexus: g1"
     assert [r["feature_id"] for r in review.rows(spec, tmp_path, tmp_path, {"c3"})] == [f"{b}:f1"]
+
+
+def test_a_walk_that_raises_blocks_the_task_instead_of_stalling_the_queue(monkeypatch, tmp_path):
+    # PLEXUS-B02: anything but a return used to leave the task `running`
+    updates = []
+    monkeypatch.setattr(run_mod._tasks, "update",
+                        lambda root, tid, **kw: updates.append((tid, kw)))
+
+    def boom(*a, **k):
+        raise SystemExit("another `plexus run` is already active")
+    monkeypatch.setattr(run_mod, "_walk", boom)
+    try:
+        run_mod.run(_spec(), tmp_path, "runs", task_id="t1")
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("the exit must still propagate")
+    assert updates[-1][1]["state"] == "blocked", updates
+    assert "already active" in updates[-1][1]["error"]
