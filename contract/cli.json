@@ -1,0 +1,200 @@
+{
+ "about": "Black-box cases for the plexus CLI, run against whatever $PLEXUS_BIN names (default: this checkout's `plexus`). Each case starts from a fresh git repo with `plexus init` run in it, then writes `setup` into it: `ledger` records (ts filled in when absent) and `plan` features. A case's `env` is added to the environment. Each step runs `plexus <args>` from the repo and checks the exit code and that stdout and stderr contain every `stdout_has` and `stderr_has` string. After the steps, `appended` lists the kinds of the ledger records the case added, in order, and `operator` the kinds of those that must carry operator: true. Every ledger record must satisfy contract/ledger.json. v1 and v2 pass the same cases (DIRECTION \u00a713).",
+ "goal_id": "my-goal",
+ "cases": [
+  {
+   "name": "an empty repo reports nothing and exits 0",
+   "steps": [
+    {
+     "args": [
+      "status"
+     ],
+     "exit": 0,
+     "stdout_has": [
+      "no goals recorded"
+     ]
+    },
+    {
+     "args": [
+      "insights"
+     ],
+     "exit": 0,
+     "stdout_has": [
+      "no ledger records"
+     ]
+    },
+    {
+     "args": [
+      "review"
+     ],
+     "exit": 0,
+     "stdout_has": [
+      "nothing landed yet"
+     ]
+    }
+   ],
+   "appended": []
+  },
+  {
+   "name": "an open escalation fails status until it is resolved",
+   "setup": {
+    "ledger": [
+     {
+      "kind": "goal.started",
+      "base_commit": "HEAD",
+      "repo": ".",
+      "spec_hash": "h"
+     },
+     {
+      "kind": "escalation.raised",
+      "feature_id": "f1",
+      "reason": "which client?",
+      "reason_class": "spec",
+      "episode_ids": []
+     }
+    ]
+   },
+   "steps": [
+    {
+     "args": [
+      "status"
+     ],
+     "exit": 1,
+     "stdout_has": [
+      "f1"
+     ]
+    },
+    {
+     "args": [
+      "resolve",
+      "f2",
+      "wrong feature"
+     ],
+     "exit": 1,
+     "stdout_has": [
+      "no open escalation for 'f2'"
+     ]
+    },
+    {
+     "args": [
+      "resolve",
+      "f1",
+      "use the v2 client"
+     ],
+     "exit": 0
+    },
+    {
+     "args": [
+      "status"
+     ],
+     "exit": 0
+    }
+   ],
+   "appended": [
+    "escalation.resolved"
+   ],
+   "operator": [
+    "escalation.resolved"
+   ]
+  },
+  {
+   "name": "approve refuses a criterion that already passes, and records a usable one",
+   "setup": {
+    "plan": [
+     {
+      "plan_id": "p1",
+      "id": "f1",
+      "title": "write done.txt",
+      "acceptance": "true",
+      "spec": "create done.txt"
+     }
+    ]
+   },
+   "steps": [
+    {
+     "args": [
+      "approve"
+     ],
+     "exit": 1,
+     "stderr_has": [
+      "not usable ground truth",
+      "f1"
+     ]
+    },
+    {
+     "args": [
+      "amend",
+      "f1",
+      "--acceptance",
+      "test -f done.txt"
+     ],
+     "exit": 0,
+     "stdout_has": [
+      "amended f1"
+     ]
+    },
+    {
+     "args": [
+      "approve"
+     ],
+     "exit": 0,
+     "stdout_has": [
+      "approved p1"
+     ]
+    }
+   ],
+   "appended": [
+    "plan.amended",
+    "plan.approved"
+   ],
+   "operator": [
+    "plan.amended",
+    "plan.approved"
+   ],
+   "env": {
+    "HEART_SANDBOX": "off"
+   }
+  },
+  {
+   "name": "insights counts what landed and what the operator did",
+   "setup": {
+    "ledger": [
+     {
+      "kind": "feature.started",
+      "feature_id": "f1",
+      "task_id": "t",
+      "attempt": 1,
+      "retry_context": null
+     },
+     {
+      "kind": "feature.landed",
+      "feature_id": "f1",
+      "task_id": "t",
+      "attempt": 1,
+      "commit": "abc",
+      "episode_id": "e1"
+     },
+     {
+      "kind": "escalation.resolved",
+      "feature_id": "f2",
+      "resolution": "ok",
+      "operator": true
+     }
+    ]
+   },
+   "steps": [
+    {
+     "args": [
+      "insights"
+     ],
+     "exit": 0,
+     "stdout_has": [
+      "landed=1",
+      "attention: 1 operator action(s)"
+     ]
+    }
+   ],
+   "appended": []
+  }
+ ]
+}
