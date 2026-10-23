@@ -98,8 +98,8 @@ def _now() -> datetime.datetime:
 def _last_activity(goal_id: str, goal_records: list[dict]) -> datetime.datetime:
     latest = max(r["ts"] for r in goal_records)
     try:  # the journal adds heart/arteries activity between ledger writes
-        # ponytail: full-journal scan, prune by day file if slow
-        for e in load_events():
+        # only events after the newest ledger record can move it
+        for e in load_events(since=latest):
             if ((e.get("payload") or {}).get("goal_id") == goal_id
                     or str(e.get("task_id", "")).startswith(goal_id + "-")):
                 if e.get("ts", "") > latest:
@@ -297,7 +297,7 @@ def stack(hours: float = 24) -> list[str]:
     failures, store degradation across heart/arteries/capillaries/marrow/plexus."""
     # hours 0 means all time; "" sorts below every ISO timestamp
     cutoff = "" if not hours else (_now() - datetime.timedelta(hours=hours)).isoformat()
-    events = [e for e in load_events() if e.get("ts", "") >= cutoff]
+    events = [e for e in load_events(since=cutoff or None) if e.get("ts", "") >= cutoff]
     lines = [f"window: {f'last {hours:g}h' if hours else 'all time'}  events={len(events)}"]
     by_source = Counter(e.get("source", "?") for e in events)
     fails = Counter(e.get("source", "?") for e in events
