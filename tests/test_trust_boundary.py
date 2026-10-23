@@ -83,3 +83,16 @@ def test_plexus_toml_boundary_is_read(tmp_path):
     (tmp_path / "plexus.toml").write_text(
         '[goal]\nid = "g"\ntext = "t"\n[ground_truth]\nsuite = "true"\n[review]\nboundary = ["src/sandbox.py", "src/e.py::f"]\n')
     assert load_spec(tmp_path).review_boundary == ("src/sandbox.py", "src/e.py::f")
+
+
+def test_change_to_the_first_body_line_is_a_hit(tmp_path):
+    # PLEXUS-B35: git's header names `import os`; the def is a context line
+    new = MODULE.replace('if k.startswith("ARTERIES_")}', 'if k.startswith(("ARTERIES_", "PULSE_"))}')
+    diff = _diff(tmp_path, MODULE, new)
+    assert review.trust_boundary(diff, BOUNDARY) == ["src/episode.py::_sandbox_profiles"]
+
+
+def test_a_pure_rename_of_a_boundary_file_is_a_hit():
+    diff = ("diff --git a/src/sandbox.py b/src/box.py\nsimilarity index 100%\n"
+            "rename from src/sandbox.py\nrename to src/box.py\n")
+    assert review.trust_boundary(diff, BOUNDARY) == ["src/sandbox.py"]

@@ -336,7 +336,8 @@ def trust_boundary(diff: str, entries: tuple[str, ...]) -> list[str]:
     imports it.
 
     A function counts as touched when a hunk's header names it (git's
-    enclosing-function context) or a changed line is its `def`.
+    enclosing-function context), a changed line is its `def`, or a changed line
+    follows its top-level `def` inside the hunk.
     ponytail: git's default funcname heuristic, so a hunk deep in a nested
     function reports the nearest unindented line above it; a top-level def is
     what the entries name, and that is what it finds."""
@@ -344,21 +345,35 @@ def trust_boundary(diff: str, entries: tuple[str, ...]) -> list[str]:
         return []
     touched: dict[str, set[str]] = {}
     current = None
+    enclosing = None  # the top-level def/class the hunk's lines are inside
     for line in diff.splitlines():
-        if line.startswith("+++ ") or line.startswith("--- "):
+        if line.startswith(("+++ ", "--- ")):
             target = line[4:].strip()
             if target.startswith(("a/", "b/")):
                 current = _unquote(target)[2:]
                 touched.setdefault(current, set())
             continue
+        if line.startswith(("rename from ", "rename to ")):
+            # a pure rename has no ---/+++ lines; the path glob still applies
+            touched.setdefault(_unquote(line.split(" ", 2)[2]), set())
+            continue
         if current is None:
             continue
         if line.startswith("@@"):
-            if m := re.search(r"@@[^@]*@@\s*(?:async\s+)?(?:def|class)\s+(\w+)", line):
-                touched[current].add(m.group(1))
-        elif line[:1] in "+-":
+            m = re.search(r"@@[^@]*@@\s*(?:async\s+)?(?:def|class)\s+(\w+)", line)
+            enclosing = m.group(1) if m else None
+            if enclosing:
+                touched[current].add(enclosing)
+            continue
+        # git's funcname can start above a nearby def, leaving that def as an
+        # unchanged context line; track it so its first body lines count (B35)
+        if m := re.match(r"[ +-](?:async\s+)?(?:def|class)\s+(\w+)", line):
+            enclosing = m.group(1)
+        if line[:1] in "+-":
             if m := re.match(r"[+-]\s*(?:async\s+)?(?:def|class)\s+(\w+)", line):
                 touched[current].add(m.group(1))
+            if enclosing:
+                touched[current].add(enclosing)
     hits = []
     for entry in entries:
         glob, _, symbol = entry.partition("::")
