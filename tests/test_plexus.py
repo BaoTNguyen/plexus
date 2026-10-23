@@ -18,6 +18,9 @@ os.environ["EVENT_JOURNAL_DIR"] = str(tmp / "journal")
 # heart's emitter keeps per-context markers under $VASCULAR_HOME; keep them
 # out of the real home, so every run starts from a fresh context
 os.environ["VASCULAR_HOME"] = str(tmp / "vascular")
+# heart reads pulse's socket with no silent file fallback (B11), and no
+# collector serves this tmp journal: read its files on purpose
+os.environ["HEART_PULSE"] = "file"
 
 here = Path(__file__).resolve()
 sys.path.insert(0, str(here.parents[1] / "src"))
