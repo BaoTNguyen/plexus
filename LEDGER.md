@@ -61,7 +61,7 @@ Written fsynced *before* the corresponding spine event.
 | `acceptance.round` | attempt, task_id, episode_id, passed, check | plexus's judgment in the real tree — heart cannot see this |
 | `feature.landed` | attempt, task_id, episode_id, commit | |
 | `review.concern` | severity, file, line, claim | written on an `approve` verdict, one per `concern`/`blocker` finding the reviewer still carried at approval — an approve discards the word, not what the reviewer noticed on the way past |
-| `escalation.raised` | reason_class, reason, episode_ids | a question for the human, with the evidence attached |
+| `escalation.raised` | reason_class, reason, episode_ids, cost_usd?, tokens_in?, tokens_out?, cache_*? | a question for the human, with the evidence attached. The usage fields are present when the escalation ends an attempt that ran an episode; absent for `sandbox_unavailable` and goal-level escalations. A `from_held` `feature.landed` carries no cost because the held escalation already did |
 | `escalation.resolved` | resolution | resets the feature's attempt *budget* (not its numbering) |
 | `goal.finished` | outcome (`scope_satisfied`\|`abandoned`), episodes_total | |
 

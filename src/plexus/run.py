@@ -357,12 +357,15 @@ SEAT_TAIL_LINES = 15
 
 def _check_seat_exhausted(ep: dict, runs_dir: Path, goal_id: str,
                           feature_id: str, attempt: int, root: Path,
-                          span: dict | None = None) -> bool:
+                          span: dict | None = None,
+                          cost: dict | None = None) -> bool:
     """Scan every role's log of a normal-build episode for a seat-exhaustion
     signal. On a match, record `seat.exhausted` (excluded from attempt
     counting, see `_feature_state`) and `escalation.raised` with
     reason_class=`seat_exhausted`, and report True so the caller stops the
-    run without charging the attempt or writing `feature.failed`.
+    run without charging the attempt or writing `feature.failed`. `cost` is
+    the attempt's usage (`_episode_cost`), carried on the escalation since no
+    `feature.failed` will.
 
     Orchestrated runs and episodes with no role logs (empty `roles`) are the
     caller's job to exclude — this only scans what it's handed."""
@@ -390,7 +393,7 @@ def _check_seat_exhausted(ep: dict, runs_dir: Path, goal_id: str,
             "escalation.raised", goal_id=goal_id, feature_id=feature_id,
             root=root, reason_class="seat_exhausted",
             reason=f"seat '{seat}' hit its usage limit, resets {reset}",
-            episode_ids=[ep["episode_id"]], **(span or {}))
+            episode_ids=[ep["episode_id"]], **(cost or {}), **(span or {}))
         return True
     return False
 
@@ -519,10 +522,7 @@ def _land_held(spec, feat: dict, root: Path, runs_dir, ep_id: str,
     acceptance now fails on the current base, hold again with the reason --
     resolving *that* rebuilds the feature, and the rebuild is held in turn."""
     repo = str(root)
-    held = next((r for r in reversed(ledger.read(root))
-                 if r["kind"] == "escalation.raised"
-                 and ep_id in (r.get("episode_ids") or [])), {})
-    cost = held.get("held_cost") or {}
+    # no cost on anything written here: the held escalation already carried it
     patch = root / runs_dir / ep_id / "diff.patch"
     why = ""
     if not patch.is_file():
@@ -545,12 +545,12 @@ def _land_held(spec, feat: dict, root: Path, runs_dir, ep_id: str,
                       reason=f"the signed-off diff from {ep_id} can't land: {why} "
                              f"-- resolve to rebuild the feature (the rebuild is held "
                              f"for sign-off again)",
-                      episode_ids=[ep_id], **cost, **span)
+                      episode_ids=[ep_id], **span)
         return False
     commit = _land(repo, diff, feat["id"])
     ledger.record("feature.landed", goal_id=spec.goal_id, feature_id=feat["id"],
                   root=root, attempt=attempt, task_id=task_id, episode_id=ep_id,
-                  commit=commit, from_held=ep_id, **cost, **span)
+                  commit=commit, from_held=ep_id, **span)
     print(f"landed {feat['id']} from signed-off episode {ep_id}")
     return True
 
@@ -1027,7 +1027,7 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
             # this one's, and a candidate with no roles has no log to read.
             if not spec.orchestrate and any(
                     _check_seat_exhausted(c, root / runs_dir, spec.goal_id,
-                                         fid, attempt, root, span)
+                                         fid, attempt, root, span, attempt_cost)
                     for c in cands if c.get("roles")):
                 return 1
 
@@ -1050,12 +1050,12 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
                         root=root, reason_class="attempts_exhausted",
                         reason=f"still blocked after {_BLOCKS_PER_FEATURE} answered "
                                f"decisions — the goal is likely underspecified: {question}",
-                        episode_ids=last_episode_ids, **span)
+                        episode_ids=last_episode_ids, **attempt_cost, **span)
                 else:
                     ledger.record(
                         "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
                         root=root, reason_class="blocked_on_decision",
-                        reason=question, episode_ids=[ep_id], **span)
+                        reason=question, episode_ids=[ep_id], **attempt_cost, **span)
                 return 1  # a human (later, the router) owes an answer before we go on
 
             # mechanical failure: no valid applied diff to judge — a coding failure,
@@ -1111,7 +1111,8 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
                         "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
                         root=root, reason_class="held_for_review",
                         reason=f"acceptance passed but the review did not run: {review_note}",
-                        episode_ids=[ep_id], held_cost=attempt_cost, **span)
+                        episode_ids=[ep_id], held_cost=attempt_cost,
+                        **attempt_cost, **span)
                     return 1
                 # Software-factory boundary: a green feature whose risk class is
                 # on the goal's review-hold list waits for a human sign-off
@@ -1149,9 +1150,11 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
                                   if callers else "")
                                + (f" (trust boundary: {', '.join(trust)})"
                                   if trust else ""),
-                        # not cost_usd: cost summers read every record, and this
-                        # attempt's cost lands on whichever record settles it
-                        episode_ids=[ep_id], held_cost=attempt_cost, **span)
+                        # the hold settles this attempt, so it carries the cost;
+                        # held_cost stays for older readers (fields are additive-only),
+                        # and the from_held land later carries none
+                        episode_ids=[ep_id], held_cost=attempt_cost,
+                        **attempt_cost, **span)
                     return 1
                 # Scope gate, last thing before the commit exists. Not a retry:
                 # the agent and the plan disagree about how wide the feature is,
@@ -1164,7 +1167,7 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
                         reason="diff touched paths the plan did not authorise: "
                                + ", ".join(sorted(stray)[:10])
                                + f" (allowed: {', '.join(feat['touches'])})",
-                        episode_ids=[ep_id], **span)
+                        episode_ids=[ep_id], **attempt_cost, **span)
                     return 1
                 commit = _land(repo, diff, fid)
                 ledger.record("feature.landed", goal_id=spec.goal_id, feature_id=fid,
