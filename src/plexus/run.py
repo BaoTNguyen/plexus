@@ -214,13 +214,17 @@ def _episode_cost(episodes: list[dict]) -> dict:
     return out
 
 
-def _goal_spend(recs: list[dict]) -> dict:
+def _goal_spend(recs: list[dict], task: str = "") -> dict:
     """Roll up what a goal has spent: episode count plus summed usage across every
     attempt (feature.landed/failed carry per-attempt cost). Uses distinct
     `spend_*` keys, never `cost_usd`/`tokens_*`, so the per-attempt cost summers
     (observe.insights/report, the fleet cost ceiling) don't double-count this
     aggregate. A usage key is omitted when nothing priced the goal — unknown, not
-    zero, same convention as _episode_cost."""
+    zero, same convention as _episode_cost. With `task`, only records whose
+    feature_id carries the task's `<task>:` namespace (plan.make_plan) count;
+    without it, the whole ledger does, as for plans written before tasks."""
+    if task:
+        recs = [r for r in recs if str(r.get("feature_id", "")).startswith(f"{task}:")]
     out: dict = {"episodes_total": sum(1 for r in recs if r["kind"] == "feature.started")}
     for src, dst in (("cost_usd", "spend_usd"), ("tokens_in", "spend_tokens_in"),
                      ("tokens_out", "spend_tokens_out")):
@@ -1236,21 +1240,21 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
     # read-only: the suite judges the real checkout and must not write into it
     suite = run_contained(spec.suite, str(repo), None)
     final = ledger.read(root)
-    spend = _goal_spend(final)
+    spend = _goal_spend(final, board_task)
     if suite.returncode == 0:
         if spec.manual_checks:
             ledger.record("validation.automated_passed", goal_id=spec.goal_id,
-                          root=root, task=task_id,
+                          root=root, task=board_task,
                           checks=list(spec.manual_checks), **spend)
             if board_task:
                 _tasks.update(root, board_task, state="landed")
             return 0
         ledger.record("goal.finished", goal_id=spec.goal_id, root=root,
-                      outcome="scope_satisfied", task=task_id, **spend)
+                      outcome="scope_satisfied", task=board_task, **spend)
         note = _open_pr(spec, root, repo)
         if note:
             ledger.record("delivery.requested", goal_id=spec.goal_id, root=root,
-                          task=task_id, result=note)
+                          task=board_task, result=note)
             print(note)
         if board_task:
             # the PR number, so validation can say which tasks a PR carries

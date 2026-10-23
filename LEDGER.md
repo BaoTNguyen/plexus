@@ -63,7 +63,7 @@ Written fsynced *before* the corresponding spine event.
 | `review.concern` | severity, file, line, claim | written on an `approve` verdict, one per `concern`/`blocker` finding the reviewer still carried at approval — an approve discards the word, not what the reviewer noticed on the way past |
 | `escalation.raised` | reason_class, reason, episode_ids, cost_usd?, tokens_in?, tokens_out?, cache_*? | a question for the human, with the evidence attached. The usage fields are present when the escalation ends an attempt that ran an episode; absent for `sandbox_unavailable` and goal-level escalations. A `from_held` `feature.landed` carries no cost because the held escalation already did |
 | `escalation.resolved` | resolution | resets the feature's attempt *budget* (not its numbering) |
-| `goal.finished` | outcome (`scope_satisfied`\|`abandoned`), episodes_total | |
+| `goal.finished` | outcome (`scope_satisfied`\|`abandoned`), task, episodes_total, spend_usd?, spend_tokens_in?, spend_tokens_out? | `task` names the board task. `episodes_total` and `spend_*` cover the finishing task only (records whose feature_id starts with `<task>:`); with no task they cover the whole ledger |
 
 `failure_class` (growing enum): `verify_failed`, `review_rejected`,
 `acceptance_failed`, `apply_failed`, `no_change`, `path_violation`,
