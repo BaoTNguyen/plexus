@@ -107,7 +107,7 @@ def test_a_quiet_episode_records_nothing(root):
 def test_a_missing_journal_is_not_a_failure(root):
     """Best-effort by contract: heart may be absent, or the journal rotated.
     Neither should fail a goal."""
-    with patch("heart.pulse.load_events", side_effect=RuntimeError("no journal")):
+    with patch("heart.observe.load_events", side_effect=RuntimeError("no journal")):
         assert scope.observe("t1", goal_id="g1", root=root) is None
 
 

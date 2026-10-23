@@ -10,7 +10,7 @@ import datetime
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from heart.pulse import load_events
+from heart.observe import load_events
 
 from .diagnose import phase_counts
 from .ledger import open_escalations, read
@@ -84,7 +84,7 @@ def _buckets(rows: list[dict]) -> str:
 
 
 def _pct(values: list[float], q: float) -> float:
-    # mirrors heart.pulse._pct; percentiles, never averages
+    # mirrors heart.observe._pct; percentiles, never averages
     if not values:
         return 0.0
     s = sorted(values)
