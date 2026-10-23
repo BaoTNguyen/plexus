@@ -1731,7 +1731,7 @@ class _Handler(BaseHTTPRequestHandler):
                     detail = (merged.stderr or merged.stdout).strip()
                     return self._json({"error": detail or "merge failed"}, 400)
                 ledger.record("delivery.merged", goal_id=_goal_id(root), root=root,
-                              pr=number, result=merged.stdout.strip())
+                              pr=number, result=merged.stdout.strip(), operator=True)
                 return self._json({"ok": True, "pr": number})
             elif u.path == "/api/task-from-issue":
                 # One GitHub issue becomes one task. This is the only place a
@@ -1806,7 +1806,7 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "confirm every manual check"}, 400)
                 ledger.record("validation.manual_passed", goal_id=spec.goal_id,
                               root=root, checks=confirmed,
-                              notes=str(data.get("notes", "")))
+                              notes=str(data.get("notes", "")), operator=True)
                 ledger.record("goal.finished", goal_id=spec.goal_id, root=root,
                               outcome="scope_satisfied")
                 note = _open_pr(spec, root, str(root))

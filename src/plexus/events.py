@@ -44,6 +44,7 @@ def emit(
     span_id: str | None = None,
     parent_span_id: str | None = None,
     trace_id: str | None = None,
+    origin: str | None = None,
     **payload,
 ) -> None:
     if goal_id:
@@ -52,4 +53,4 @@ def emit(
         payload["feature_id"] = feature_id
     _emit(SOURCE, kind, task_id=task_id, episode_id=episode_id,
           duration_ms=duration_ms, span_id=span_id,
-          parent_span_id=parent_span_id, trace_id=trace_id, **payload)
+          parent_span_id=parent_span_id, trace_id=trace_id, origin=origin, **payload)

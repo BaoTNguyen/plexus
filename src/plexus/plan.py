@@ -498,7 +498,7 @@ def amend(spec, feature_id: str, root: str | Path = ".",
         for p in plan:
             f.write(json.dumps(p) + "\n")
     ledger.record("plan.amended", goal_id=spec.goal_id, feature_id=feature_id,
-                  root=root, task=task_id, changed=sorted(changes))
+                  root=root, task=task_id, changed=sorted(changes), operator=True)
     return f"amended {feature_id}: {', '.join(sorted(changes))} — re-run `plexus run`"
 
 
@@ -525,5 +525,5 @@ def approve(spec, root: str | Path = ".", approver: str = "human",
             + "\nFix them in .vascular/plexus/plan.jsonl, or `plexus approve --waive` to accept.")
     ledger.record("plan.approved", goal_id=spec.goal_id, root=root,
                   plan_id=plan_id, task=task_id, approver=approver,
-                  waived=[fid for fid, _ in bad])
+                  waived=[fid for fid, _ in bad], operator=not approver.startswith("auto"))
     return plan_id

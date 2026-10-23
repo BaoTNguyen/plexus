@@ -218,8 +218,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "review":
         from . import review
         from .spec import load_spec
-        print(review.preview(args.root) if args.plan
-              else review.report(load_spec(args.root), args.root))
+        if args.plan:
+            print(review.preview(args.root))
+            return 0
+        spec = load_spec(args.root)
+        print(review.report(spec, args.root))
+        # reading what landed is attention too (F29); no ledger row, nothing changed
+        from . import events
+        events.emit("operator.reviewed", goal_id=spec.goal_id, origin="operator")
         return 0
     if args.cmd == "status":
         from . import observe
