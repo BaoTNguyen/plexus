@@ -288,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "tail":
         # lazy: only this subcommand reads heart's journal
-        from heart.pulse import tail
+        from heart.observe import tail
         tail(n=args.n, source=args.source, live=not args.no_follow)
         return 0
     if args.cmd == "serve":

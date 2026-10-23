@@ -38,7 +38,7 @@ from queue import Empty
 from urllib.parse import parse_qs, urlparse
 
 import heart.events as he
-from heart.pulse import load_events
+from heart.observe import load_events
 from heart.runner import CACHE_MULTIPLIERS, speed_multiplier
 
 from . import diagnose, ledger, observe, overview, registry, review, tasks, term, translog

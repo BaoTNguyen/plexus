@@ -983,7 +983,7 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
                 network=spec.network,
             )
             # goal lineage: heart's emit() stamps these into every event of the
-            # dispatched episode, so `heart pulse goal <id>` can trace
+            # dispatched episode, so `heart observe goal <id>` can trace
             # goal -> feature -> episode -> outcome (plexus runs serially, so
             # process-global env is safe here)
             os.environ["PLEXUS_GOAL_ID"] = spec.goal_id

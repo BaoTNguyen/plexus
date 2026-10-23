@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from heart.pulse import load_events
+from heart.observe import load_events
 
 from .ledger import read, record
 
