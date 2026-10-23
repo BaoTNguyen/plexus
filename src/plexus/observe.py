@@ -31,6 +31,58 @@ def _spend(records: list[dict]) -> tuple[float, int, int, int]:
             len(priced))
 
 
+_HELD = {"held_for_review": "held", "held_stale": "held", "scope_violation": "scope"}
+OUTCOMES = ("landed", "failed", "blocked", "held", "scope", "crashed")
+
+
+def attempt_outcomes(recs: list[dict]) -> list[dict]:
+    """One row per feature.started, settled by the first landed/failed/
+    escalation for that feature before its next start; unsettled is crashed.
+
+    Escalations with no open attempt (attempts_exhausted after a failed, a
+    held_stale from a held land) settle nothing, so nothing is billed twice.
+    A from_held land relabels the held attempt it names, at no added cost."""
+    out: list[dict] = []
+    open_: dict[tuple, dict] = {}
+    held: dict[str, dict] = {}
+    n: Counter = Counter()
+    for r in recs:
+        kind, key = r.get("kind"), (r.get("goal_id"), r.get("feature_id"))
+        if kind == "feature.started":
+            n[key] += 1
+            fid = key[1] or ""
+            row = {"goal_id": key[0], "task": fid.split(":", 1)[0] if ":" in fid else "(none)",
+                   "feature_id": key[1], "attempt": r.get("attempt", n[key]),
+                   "outcome": "crashed", "cost_usd": None, "tokens_in": None, "tokens_out": None}
+            out.append(row)
+            open_[key] = row
+            continue
+        if kind == "feature.landed" and r.get("from_held") in held:
+            held.pop(r["from_held"])["outcome"] = "landed"
+            continue
+        if kind not in ("feature.landed", "feature.failed", "escalation.raised") \
+                or key not in open_:
+            continue
+        row = open_.pop(key)
+        if kind == "escalation.raised":
+            row["outcome"] = _HELD.get(r.get("reason_class"), "blocked")
+        else:
+            row["outcome"] = kind.split(".")[1]
+        # legacy holds priced only held_cost
+        src = r if r.get("cost_usd") is not None else (r.get("held_cost") or r)
+        row.update({k: src.get(k) for k in ("cost_usd", "tokens_in", "tokens_out")})
+        if row["outcome"] == "held":
+            held.update(dict.fromkeys(r.get("episode_ids") or [], row))
+    return out
+
+
+def _buckets(rows: list[dict]) -> str:
+    c = Counter(r["outcome"] for r in rows)
+    cost = sum(r["cost_usd"] for r in rows if r["cost_usd"] is not None)
+    return (f"started={len(rows)} " + " ".join(f"{o}={c[o]}" for o in OUTCOMES)
+            + f" cost=${cost:.4f}")
+
+
 def _pct(values: list[float], q: float) -> float:
     # mirrors heart.pulse._pct; percentiles, never averages
     if not values:
@@ -144,6 +196,10 @@ def insights(root: str = ".") -> list[str]:
         f"features: landed={kinds['feature.landed']} failed-attempts={kinds['feature.failed']}  "
         f"escalations: raised={kinds['escalation.raised']} resolved={kinds['escalation.resolved']}"
     ]
+    attempts = attempt_outcomes(recs)
+    lines.append("attempts: " + _buckets(attempts))
+    for task in dict.fromkeys(a["task"] for a in attempts):
+        lines.append(f"  task {task}: " + _buckets([a for a in attempts if a["task"] == task]))
     started: dict[tuple, str] = {}
     failed_first: set[tuple] = set()
     lead: list[float] = []
@@ -165,10 +221,10 @@ def insights(root: str = ".") -> list[str]:
                      f"p95={_pct(lead, .95):.0f}s n={len(lead)}")
     if failed_first:
         lines.append(f"retry rescue: first-attempt-failed={len(failed_first)} rescued={rescued}")
-    # durable per-goal spend: run.py stamps each landed/failed attempt with the
-    # cost of every candidate it ran. Summed here so a multi-week goal's bill
-    # survives the journal's day-scale retention (the journal's live total is `stack`).
-    cost, tin, tout, n = _spend(recs)
+    # durable per-goal spend: each attempt is billed by the record that settled
+    # it. Summed here so a multi-week goal's bill survives the journal's
+    # day-scale retention (the journal's live total is `stack`).
+    cost, tin, tout, n = _spend(attempts)
     if n:
         lines.append(f"cost: ${cost:.4f}  tokens: {tin:,} in / {tout:,} out  "
                      f"over {n} attempt(s)")
@@ -200,8 +256,9 @@ def _metrics(recs: list[dict], goal_id: str) -> dict:
                          - datetime.datetime.fromisoformat(started[fid])).total_seconds())
     touched = len({r["feature_id"] for r in rows
                    if r.get("feature_id") and r["kind"] == "feature.started"})
-    spend = sum(r["cost_usd"] for r in rows if r.get("cost_usd") is not None)
-    return {"spend": round(spend, 4),
+    attempts = attempt_outcomes(rows)
+    spend = sum(a["cost_usd"] for a in attempts if a["cost_usd"] is not None)
+    return {"spend": round(spend, 4), "attempts": len(attempts),
             "lead_p50": _pct(lead, .5), "lead_n": len(lead),
             "landed": kinds["feature.landed"],
             "esc_raised": kinds["escalation.raised"], "touched": touched,
@@ -214,7 +271,7 @@ def report(roots: list[str | Path]) -> list[str]:
     total. The three numbers a multi-project menu is judged on, joined from
     each repo's ledger. `plexus insights` is the single-goal deep read; this is
     the across-projects scoreboard."""
-    lines = [f"{'goal':<26} {'spend':>9}  {'lead_p50':>9}  {'esc/feat':>8}  landed"]
+    lines = [f"{'goal':<26} {'spend':>9}  {'lead_p50':>9}  {'esc/feat':>8}  {'attempts':>8}  landed"]
     tot_spend = tot_esc = tot_touch = 0.0
     seen = 0
     for root in roots:
@@ -223,7 +280,7 @@ def report(roots: list[str | Path]) -> list[str]:
             m = _metrics(recs, gid)
             lead = f"{m['lead_p50']:.0f}s" if m["lead_n"] else "—"
             lines.append(f"{gid[:26]:<26} ${m['spend']:>8.4f}  {lead:>9}  "
-                         f"{m['esc_rate']:>8.2f}  {m['landed']}")
+                         f"{m['esc_rate']:>8.2f}  {m['attempts']:>8}  {m['landed']}")
             tot_spend += m["spend"]
             tot_esc += m["esc_raised"]
             tot_touch += m["touched"]
