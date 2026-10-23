@@ -1,0 +1,170 @@
+{
+ "about": "The plexus ledger format: one JSON object per line in .vascular/plexus/ledger.jsonl, appended and fsynced, never rewritten. Every record carries `common`; each kind also carries its `required` fields. Fields beyond these are allowed (additive only), and an unknown kind is allowed too. Derived 2026-10-23 from 1,319 real records in six repos (a field every record of the kind carried). v1 and v2 are both judged against this file (DIRECTION \u00a713: passing the same black-box tests is parity).",
+ "common": [
+  "goal_id",
+  "kind",
+  "ts"
+ ],
+ "types": {
+  "ts": "RFC 3339 timestamp with an explicit offset",
+  "kind": "string",
+  "goal_id": "string",
+  "operator": "true when a person did this (F29); absent otherwise"
+ },
+ "kinds": {
+  "acceptance.round": {
+   "required": [
+    "attempt",
+    "check",
+    "episode_id",
+    "episode_outcome",
+    "failed_stage",
+    "feature_id",
+    "passed",
+    "task_id"
+   ]
+  },
+  "delivery.requested": {
+   "required": [
+    "result",
+    "task"
+   ]
+  },
+  "escalation.raised": {
+   "required": [
+    "episode_ids",
+    "feature_id",
+    "reason",
+    "reason_class"
+   ]
+  },
+  "escalation.resolved": {
+   "required": [
+    "feature_id",
+    "resolution"
+   ]
+  },
+  "feature.failed": {
+   "required": [
+    "acceptance_passed",
+    "attempt",
+    "cache_read",
+    "cache_write_1h",
+    "cache_write_5m",
+    "cost_usd",
+    "episode_id",
+    "episode_outcome",
+    "failure_class",
+    "feature_id",
+    "reason",
+    "task_id",
+    "tokens_in",
+    "tokens_out"
+   ]
+  },
+  "feature.landed": {
+   "required": [
+    "attempt",
+    "commit",
+    "episode_id",
+    "feature_id",
+    "task_id"
+   ]
+  },
+  "feature.started": {
+   "required": [
+    "attempt",
+    "feature_id",
+    "retry_context",
+    "task_id"
+   ]
+  },
+  "goal.finished": {
+   "required": [
+    "outcome",
+    "task"
+   ]
+  },
+  "goal.started": {
+   "required": [
+    "base_commit",
+    "repo",
+    "spec_hash"
+   ]
+  },
+  "operator.note": {
+   "required": [
+    "corrects",
+    "episode_id",
+    "feature_id",
+    "field",
+    "note",
+    "should_be",
+    "was"
+   ]
+  },
+  "plan.amended": {
+   "required": [
+    "changed",
+    "feature_id",
+    "task"
+   ]
+  },
+  "plan.approved": {
+   "required": [
+    "approver",
+    "plan_id",
+    "task",
+    "waived"
+   ]
+  },
+  "plan.created": {
+   "required": [
+    "features",
+    "plan_id",
+    "rejected",
+    "spec_hash",
+    "task"
+   ]
+  },
+  "review.concern": {
+   "required": [
+    "claim",
+    "feature_id",
+    "file",
+    "line",
+    "severity"
+   ]
+  },
+  "sandbox.start_failed": {
+   "required": [
+    "attempt",
+    "error",
+    "feature_id"
+   ]
+  },
+  "scope.observed": {
+   "required": [
+    "feature_id",
+    "needed",
+    "probed",
+    "task_id"
+   ]
+  },
+  "seat.exhausted": {
+   "required": [
+    "attempt",
+    "feature_id",
+    "resets",
+    "seat"
+   ]
+  },
+  "upstream.requested": {
+   "required": [
+    "reason",
+    "requested_by",
+    "symbol"
+   ]
+  }
+ }
+}
