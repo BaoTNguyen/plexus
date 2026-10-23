@@ -271,43 +271,27 @@ def _feature_state(recs: list[dict], goal_id: str,
     `escalation.resolved` resets the *budget* — so budget_used counts attempts
     since the last resolution, not since the feature began (LEDGER).
 
-    A `feature.started` whose only follow-up was one or more
-    `sandbox.start_failed` records (the sandbox itself never came up — no
-    `feature.failed`/`feature.landed` ever resulted) does not spend an
-    attempt: the agent never got a turn, so resuming after such a run must
-    not charge the feature for it."""
+    Only a `feature.failed` spends budget: it is the one record that says the
+    agent had its turn and the result was judged. A `feature.started` followed
+    by `sandbox.start_failed`, `seat.exhausted` or nothing at all (the run died
+    before its episode settled, F83) costs the feature nothing. Every other way
+    an attempt ends raises an escalation, and resolving one resets the budget
+    anyway."""
     landed = False
     max_attempt = 0
     budget_used = 0
-    pending = False       # an unflushed feature.started
-    had_sandbox_failure = False
-    had_seat_exhausted = False
-    had_failed = False
     for r in recs:
         if r.get("goal_id") != goal_id or r.get("feature_id") != feature_id:
             continue
         kind = r["kind"]
         if kind == "feature.started":
-            if pending and not ((had_sandbox_failure or had_seat_exhausted)
-                                and not had_failed):
-                budget_used += 1
             max_attempt = max(max_attempt, int(r.get("attempt", 0)))
-            pending, had_sandbox_failure, had_seat_exhausted, had_failed = \
-                True, False, False, False
         elif kind == "feature.landed":
             landed = True
-            pending = False
         elif kind == "feature.failed":
-            had_failed = True
-        elif kind == "sandbox.start_failed":
-            had_sandbox_failure = True
-        elif kind == "seat.exhausted":
-            had_seat_exhausted = True
+            budget_used += 1
         elif kind == "escalation.resolved":
             budget_used = 0  # resolving hands the feature a fresh budget
-            pending = False
-    if pending and not ((had_sandbox_failure or had_seat_exhausted) and not had_failed):
-        budget_used += 1
     if landed:
         return "landed", max_attempt, budget_used
     blocked = any(e["feature_id"] == feature_id for e in ledger.open_escalations(recs, goal_id))
@@ -407,8 +391,21 @@ def _verifier_tail(ep: dict, limit: int = 1000) -> str:
     bounded exception to 'reference, don't copy' (LEDGER law 3)."""
     for r in (ep.get("verifier_results") or {}).values():
         if not r.get("passed"):
-            return (r.get("output") or "").strip()[-limit:]
+            # heart writes `output_tail`; reading `output` left every retry
+            # after a regression blind (F24)
+            return (r.get("output_tail") or r.get("output") or "").strip()[-limit:]
     return ""
+
+
+def _regression_signature(ep: dict) -> frozenset[str]:
+    """What failed, comparable across attempts: each failing verifier, plus the
+    test ids pytest names on its `FAILED` lines. Empty when nothing failed."""
+    sig = set()
+    for name, r in (ep.get("verifier_results") or {}).items():
+        if not r.get("passed"):
+            sig.add(name)
+            sig.update(re.findall(r"(?m)^FAILED (\S+)", r.get("output_tail") or ""))
+    return frozenset(sig)
 
 
 def _run_acceptance(repo: str | Path, base_commit: str, diff: str,
@@ -961,6 +958,7 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
         attempt = next_attempt
         budget = spec.attempts_per_feature - budget_used
         span: dict[str, str] = {}
+        prev_regression: frozenset[str] = frozenset()
         for i in range(budget):
             task_id = events.make_task_id(spec.goal_id, fid, attempt)
             span = {"span_id": events.attempt_span(plan_id, fid, attempt),
@@ -1217,6 +1215,20 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
                                   f"acceptance={'pass' if acc_passed else 'fail'}")
                                  + f" regression={'FAIL' if ep_outcome == 'fail' else 'ok'}",
                           **attempt_cost, **span)
+            # the same regression twice: the failing tests sit where this
+            # feature can't reach them (outside touches, or already failing on
+            # base), so a third identical try only burns budget (F22)
+            regression = _regression_signature(ep) if fclass == "verify_failed" else frozenset()
+            if regression and regression == prev_regression:
+                ledger.record("escalation.raised", goal_id=spec.goal_id, feature_id=fid,
+                              root=root, reason_class="regression_repeated",
+                              reason="the same regression failed two attempts running, "
+                                     "so it is likely outside what this feature can "
+                                     "change (a test beyond touches, or one already "
+                                     "failing on base): " + ", ".join(sorted(regression))[:400],
+                              episode_ids=last_episode_ids, **span)
+                return 1
+            prev_regression = regression
             if review == "reject":
                 findings = [
                     {"severity": f.get("severity"), "file": f.get("file"),

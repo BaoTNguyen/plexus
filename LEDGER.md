@@ -78,7 +78,14 @@ tries for one attempt — the run stops rather than burning the feature's
 budget on infra that never gave the agent a turn), `seat_exhausted` (a role's
 agent log showed a weekly/usage-limit line with a reset time — the run stops
 immediately, before any `feature.failed`, and the task lands on `blocked`
-rather than waiting for `attempts_exhausted`).
+rather than waiting for `attempts_exhausted`), `regression_repeated` (two
+attempts running passed acceptance but failed the suite on the same verifiers
+and `FAILED` test ids; the reason lists them. Raised in place of the remaining
+attempts, because a diff this feature may write evidently can't fix it).
+
+Only `feature.failed` spends an attempt's budget. A `feature.started` with no
+`feature.failed` after it (sandbox never started, seat exhausted, or the run
+died before the episode settled) costs nothing.
 
 ## Export contract (what marrow reads)
 
