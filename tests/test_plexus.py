@@ -473,8 +473,10 @@ assert c == {"cost_usd": 0.15, "tokens_in": 140, "tokens_out": 70}, c
 assert _episode_cost([{"usage": None}]) == {}, "no usage → no cost keys, not zeros"
 
 cr = tmp / "cost-repo"
+ledger.record("feature.started", goal_id="g", feature_id="f1", root=cr)
 ledger.record("feature.landed", goal_id="g", feature_id="f1", root=cr,
               cost_usd=0.15, tokens_in=140, tokens_out=70)
+ledger.record("feature.started", goal_id="g", feature_id="f2", root=cr)
 ledger.record("feature.failed", goal_id="g", feature_id="f2", root=cr,
               cost_usd=0.05, tokens_in=40, tokens_out=20)
 ins = "\n".join(observe.insights(str(cr)))

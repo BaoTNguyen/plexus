@@ -4,15 +4,11 @@ Drives plexus.run._walk directly, with heart's episode dispatch stubbed out:
 what's under test is the land decision at the review gate, not heart itself.
 """
 import json
-import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
-
-os.environ.setdefault("EVENT_JOURNAL_DIR", tempfile.mkdtemp(prefix="plexus-journal-"))
 
 here = Path(__file__).resolve()
 for p in (here.parents[1] / "src", here.parents[2] / "heart" / "src"):

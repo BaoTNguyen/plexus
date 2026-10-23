@@ -58,6 +58,7 @@ _ESC_PHASE: dict[str, str | None] = {
     "regression": "testing",
     "destructive_action": "coding",
     "attempts_exhausted": None,
+    "regression_repeated": None,
     "budget_exhausted": None,
 }
 

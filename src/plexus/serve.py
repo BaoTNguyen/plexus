@@ -45,6 +45,7 @@ from . import diagnose, ledger, observe, overview, registry, review, tasks, term
 from . import vascular_state
 from .plan import approve, auto_plan, load_plan
 from .run import _feature_state, _open_pr
+from .sandbox import gate as sandbox_gate
 from .spec import load_spec
 
 # root(resolved str) -> Popen we spawned, kept only so we can reap it (avoid
@@ -1768,6 +1769,10 @@ class _Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "a plan or run job is already active"}, 409)
                 return self._json({"ok": True, "state": "planning"})
             elif u.path == "/api/approve":
+                # approve runs the planner's criteria in this process, not via
+                # the CLI, so the CLI's sandbox gate never saw it (PLEXUS-B14)
+                if why := sandbox_gate():
+                    return self._json({"error": why}, 409)
                 approve(load_spec(root), root, waive=data.get("waive", False),
                         task_id=str(data.get("task", "")))
             elif u.path == "/api/run":

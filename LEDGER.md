@@ -61,9 +61,9 @@ Written fsynced *before* the corresponding spine event.
 | `acceptance.round` | attempt, task_id, episode_id, passed, check | plexus's judgment in the real tree — heart cannot see this |
 | `feature.landed` | attempt, task_id, episode_id, commit | |
 | `review.concern` | severity, file, line, claim | written on an `approve` verdict, one per `concern`/`blocker` finding the reviewer still carried at approval — an approve discards the word, not what the reviewer noticed on the way past |
-| `escalation.raised` | reason_class, reason, episode_ids | a question for the human, with the evidence attached |
+| `escalation.raised` | reason_class, reason, episode_ids, cost_usd?, tokens_in?, tokens_out?, cache_*? | a question for the human, with the evidence attached. The usage fields are present when the escalation ends an attempt that ran an episode; absent for `sandbox_unavailable` and goal-level escalations. A `from_held` `feature.landed` carries no cost because the held escalation already did |
 | `escalation.resolved` | resolution | resets the feature's attempt *budget* (not its numbering) |
-| `goal.finished` | outcome (`scope_satisfied`\|`abandoned`), episodes_total | |
+| `goal.finished` | outcome (`scope_satisfied`\|`abandoned`), task, episodes_total, spend_usd?, spend_tokens_in?, spend_tokens_out? | `task` names the board task. `episodes_total` and `spend_*` cover the finishing task only (records whose feature_id starts with `<task>:`); with no task they cover the whole ledger |
 
 `failure_class` (growing enum): `verify_failed`, `review_rejected`,
 `acceptance_failed`, `apply_failed`, `no_change`, `path_violation`,
@@ -78,7 +78,14 @@ tries for one attempt — the run stops rather than burning the feature's
 budget on infra that never gave the agent a turn), `seat_exhausted` (a role's
 agent log showed a weekly/usage-limit line with a reset time — the run stops
 immediately, before any `feature.failed`, and the task lands on `blocked`
-rather than waiting for `attempts_exhausted`).
+rather than waiting for `attempts_exhausted`), `regression_repeated` (two
+attempts running passed acceptance but failed the suite on the same verifiers
+and `FAILED` test ids; the reason lists them. Raised in place of the remaining
+attempts, because a diff this feature may write evidently can't fix it).
+
+Only `feature.failed` spends an attempt's budget. A `feature.started` with no
+`feature.failed` after it (sandbox never started, seat exhausted, or the run
+died before the episode settled) costs nothing.
 
 ## Export contract (what marrow reads)
 

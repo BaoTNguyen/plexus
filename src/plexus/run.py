@@ -22,8 +22,11 @@ import importlib
 import os
 import re
 import shlex
+import signal
 import subprocess
+import sys
 import tempfile
+import threading
 import tomllib
 from pathlib import Path
 
@@ -211,13 +214,17 @@ def _episode_cost(episodes: list[dict]) -> dict:
     return out
 
 
-def _goal_spend(recs: list[dict]) -> dict:
+def _goal_spend(recs: list[dict], task: str = "") -> dict:
     """Roll up what a goal has spent: episode count plus summed usage across every
     attempt (feature.landed/failed carry per-attempt cost). Uses distinct
     `spend_*` keys, never `cost_usd`/`tokens_*`, so the per-attempt cost summers
     (observe.insights/report, the fleet cost ceiling) don't double-count this
     aggregate. A usage key is omitted when nothing priced the goal — unknown, not
-    zero, same convention as _episode_cost."""
+    zero, same convention as _episode_cost. With `task`, only records whose
+    feature_id carries the task's `<task>:` namespace (plan.make_plan) count;
+    without it, the whole ledger does, as for plans written before tasks."""
+    if task:
+        recs = [r for r in recs if str(r.get("feature_id", "")).startswith(f"{task}:")]
     out: dict = {"episodes_total": sum(1 for r in recs if r["kind"] == "feature.started")}
     for src, dst in (("cost_usd", "spend_usd"), ("tokens_in", "spend_tokens_in"),
                      ("tokens_out", "spend_tokens_out")):
@@ -264,43 +271,27 @@ def _feature_state(recs: list[dict], goal_id: str,
     `escalation.resolved` resets the *budget* — so budget_used counts attempts
     since the last resolution, not since the feature began (LEDGER).
 
-    A `feature.started` whose only follow-up was one or more
-    `sandbox.start_failed` records (the sandbox itself never came up — no
-    `feature.failed`/`feature.landed` ever resulted) does not spend an
-    attempt: the agent never got a turn, so resuming after such a run must
-    not charge the feature for it."""
+    Only a `feature.failed` spends budget: it is the one record that says the
+    agent had its turn and the result was judged. A `feature.started` followed
+    by `sandbox.start_failed`, `seat.exhausted` or nothing at all (the run died
+    before its episode settled, F83) costs the feature nothing. Every other way
+    an attempt ends raises an escalation, and resolving one resets the budget
+    anyway."""
     landed = False
     max_attempt = 0
     budget_used = 0
-    pending = False       # an unflushed feature.started
-    had_sandbox_failure = False
-    had_seat_exhausted = False
-    had_failed = False
     for r in recs:
         if r.get("goal_id") != goal_id or r.get("feature_id") != feature_id:
             continue
         kind = r["kind"]
         if kind == "feature.started":
-            if pending and not ((had_sandbox_failure or had_seat_exhausted)
-                                and not had_failed):
-                budget_used += 1
             max_attempt = max(max_attempt, int(r.get("attempt", 0)))
-            pending, had_sandbox_failure, had_seat_exhausted, had_failed = \
-                True, False, False, False
         elif kind == "feature.landed":
             landed = True
-            pending = False
         elif kind == "feature.failed":
-            had_failed = True
-        elif kind == "sandbox.start_failed":
-            had_sandbox_failure = True
-        elif kind == "seat.exhausted":
-            had_seat_exhausted = True
+            budget_used += 1
         elif kind == "escalation.resolved":
             budget_used = 0  # resolving hands the feature a fresh budget
-            pending = False
-    if pending and not ((had_sandbox_failure or had_seat_exhausted) and not had_failed):
-        budget_used += 1
     if landed:
         return "landed", max_attempt, budget_used
     blocked = any(e["feature_id"] == feature_id for e in ledger.open_escalations(recs, goal_id))
@@ -354,12 +345,15 @@ SEAT_TAIL_LINES = 15
 
 def _check_seat_exhausted(ep: dict, runs_dir: Path, goal_id: str,
                           feature_id: str, attempt: int, root: Path,
-                          span: dict | None = None) -> bool:
+                          span: dict | None = None,
+                          cost: dict | None = None) -> bool:
     """Scan every role's log of a normal-build episode for a seat-exhaustion
     signal. On a match, record `seat.exhausted` (excluded from attempt
     counting, see `_feature_state`) and `escalation.raised` with
     reason_class=`seat_exhausted`, and report True so the caller stops the
-    run without charging the attempt or writing `feature.failed`.
+    run without charging the attempt or writing `feature.failed`. `cost` is
+    the attempt's usage (`_episode_cost`), carried on the escalation since no
+    `feature.failed` will.
 
     Orchestrated runs and episodes with no role logs (empty `roles`) are the
     caller's job to exclude — this only scans what it's handed."""
@@ -387,7 +381,7 @@ def _check_seat_exhausted(ep: dict, runs_dir: Path, goal_id: str,
             "escalation.raised", goal_id=goal_id, feature_id=feature_id,
             root=root, reason_class="seat_exhausted",
             reason=f"seat '{seat}' hit its usage limit, resets {reset}",
-            episode_ids=[ep["episode_id"]], **(span or {}))
+            episode_ids=[ep["episode_id"]], **(cost or {}), **(span or {}))
         return True
     return False
 
@@ -397,8 +391,21 @@ def _verifier_tail(ep: dict, limit: int = 1000) -> str:
     bounded exception to 'reference, don't copy' (LEDGER law 3)."""
     for r in (ep.get("verifier_results") or {}).values():
         if not r.get("passed"):
-            return (r.get("output") or "").strip()[-limit:]
+            # heart writes `output_tail`; reading `output` left every retry
+            # after a regression blind (F24)
+            return (r.get("output_tail") or r.get("output") or "").strip()[-limit:]
     return ""
+
+
+def _regression_signature(ep: dict) -> frozenset[str]:
+    """What failed, comparable across attempts: each failing verifier, plus the
+    test ids pytest names on its `FAILED` lines. Empty when nothing failed."""
+    sig = set()
+    for name, r in (ep.get("verifier_results") or {}).items():
+        if not r.get("passed"):
+            sig.add(name)
+            sig.update(re.findall(r"(?m)^FAILED (\S+)", r.get("output_tail") or ""))
+    return frozenset(sig)
 
 
 def _run_acceptance(repo: str | Path, base_commit: str, diff: str,
@@ -516,10 +523,7 @@ def _land_held(spec, feat: dict, root: Path, runs_dir, ep_id: str,
     acceptance now fails on the current base, hold again with the reason --
     resolving *that* rebuilds the feature, and the rebuild is held in turn."""
     repo = str(root)
-    held = next((r for r in reversed(ledger.read(root))
-                 if r["kind"] == "escalation.raised"
-                 and ep_id in (r.get("episode_ids") or [])), {})
-    cost = held.get("held_cost") or {}
+    # no cost on anything written here: the held escalation already carried it
     patch = root / runs_dir / ep_id / "diff.patch"
     why = ""
     if not patch.is_file():
@@ -542,12 +546,12 @@ def _land_held(spec, feat: dict, root: Path, runs_dir, ep_id: str,
                       reason=f"the signed-off diff from {ep_id} can't land: {why} "
                              f"-- resolve to rebuild the feature (the rebuild is held "
                              f"for sign-off again)",
-                      episode_ids=[ep_id], **cost, **span)
+                      episode_ids=[ep_id], **span)
         return False
     commit = _land(repo, diff, feat["id"])
     ledger.record("feature.landed", goal_id=spec.goal_id, feature_id=feat["id"],
                   root=root, attempt=attempt, task_id=task_id, episode_id=ep_id,
-                  commit=commit, from_held=ep_id, **cost, **span)
+                  commit=commit, from_held=ep_id, **span)
     print(f"landed {feat['id']} from signed-off episode {ep_id}")
     return True
 
@@ -822,7 +826,26 @@ def run(spec, root: str | Path = ".", runs_dir: str | Path | None = None,
     if task_id:
         _tasks.update(root, task_id, state="running", error="")
         print(f"task {task_id}")
-    code = _walk(spec, root, runs_dir, candidates, task_id)
+    # Stop sends SIGTERM; as SystemExit it unwinds through the handler below
+    # instead of killing us with the task still `running` (PLEXUS-B02)
+    main = threading.current_thread() is threading.main_thread()
+    if main:
+        prev_term = signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    try:
+        code = _walk(spec, root, runs_dir, candidates, task_id)
+    except BaseException as e:
+        # a `running` task makes next_task() return None forever, so any way out
+        # of the walk that isn't a return has to put the task somewhere visible
+        if task_id:
+            why = f"run ended without finishing: {type(e).__name__}: {e}"
+            try:
+                _tasks.update(root, task_id, state="blocked", error=why[:500])
+            except ValueError:
+                pass
+        raise
+    finally:
+        if main:
+            signal.signal(signal.SIGTERM, prev_term or signal.SIG_DFL)
     if code == 1 and task_id:
         _mark_blocked(root, task_id, ledger.read(root), spec.goal_id)
     return code
@@ -935,6 +958,7 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
         attempt = next_attempt
         budget = spec.attempts_per_feature - budget_used
         span: dict[str, str] = {}
+        prev_regression: frozenset[str] = frozenset()
         for i in range(budget):
             task_id = events.make_task_id(spec.goal_id, fid, attempt)
             span = {"span_id": events.attempt_span(plan_id, fid, attempt),
@@ -1005,7 +1029,7 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
             # this one's, and a candidate with no roles has no log to read.
             if not spec.orchestrate and any(
                     _check_seat_exhausted(c, root / runs_dir, spec.goal_id,
-                                         fid, attempt, root, span)
+                                         fid, attempt, root, span, attempt_cost)
                     for c in cands if c.get("roles")):
                 return 1
 
@@ -1028,12 +1052,12 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
                         root=root, reason_class="attempts_exhausted",
                         reason=f"still blocked after {_BLOCKS_PER_FEATURE} answered "
                                f"decisions — the goal is likely underspecified: {question}",
-                        episode_ids=last_episode_ids, **span)
+                        episode_ids=last_episode_ids, **attempt_cost, **span)
                 else:
                     ledger.record(
                         "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
                         root=root, reason_class="blocked_on_decision",
-                        reason=question, episode_ids=[ep_id], **span)
+                        reason=question, episode_ids=[ep_id], **attempt_cost, **span)
                 return 1  # a human (later, the router) owes an answer before we go on
 
             # mechanical failure: no valid applied diff to judge — a coding failure,
@@ -1089,7 +1113,8 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
                         "escalation.raised", goal_id=spec.goal_id, feature_id=fid,
                         root=root, reason_class="held_for_review",
                         reason=f"acceptance passed but the review did not run: {review_note}",
-                        episode_ids=[ep_id], held_cost=attempt_cost, **span)
+                        episode_ids=[ep_id], held_cost=attempt_cost,
+                        **attempt_cost, **span)
                     return 1
                 # Software-factory boundary: a green feature whose risk class is
                 # on the goal's review-hold list waits for a human sign-off
@@ -1127,9 +1152,11 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
                                   if callers else "")
                                + (f" (trust boundary: {', '.join(trust)})"
                                   if trust else ""),
-                        # not cost_usd: cost summers read every record, and this
-                        # attempt's cost lands on whichever record settles it
-                        episode_ids=[ep_id], held_cost=attempt_cost, **span)
+                        # the hold settles this attempt, so it carries the cost;
+                        # held_cost stays for older readers (fields are additive-only),
+                        # and the from_held land later carries none
+                        episode_ids=[ep_id], held_cost=attempt_cost,
+                        **attempt_cost, **span)
                     return 1
                 # Scope gate, last thing before the commit exists. Not a retry:
                 # the agent and the plan disagree about how wide the feature is,
@@ -1142,7 +1169,7 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
                         reason="diff touched paths the plan did not authorise: "
                                + ", ".join(sorted(stray)[:10])
                                + f" (allowed: {', '.join(feat['touches'])})",
-                        episode_ids=[ep_id], **span)
+                        episode_ids=[ep_id], **attempt_cost, **span)
                     return 1
                 commit = _land(repo, diff, fid)
                 ledger.record("feature.landed", goal_id=spec.goal_id, feature_id=fid,
@@ -1188,6 +1215,20 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
                                   f"acceptance={'pass' if acc_passed else 'fail'}")
                                  + f" regression={'FAIL' if ep_outcome == 'fail' else 'ok'}",
                           **attempt_cost, **span)
+            # the same regression twice: the failing tests sit where this
+            # feature can't reach them (outside touches, or already failing on
+            # base), so a third identical try only burns budget (F22)
+            regression = _regression_signature(ep) if fclass == "verify_failed" else frozenset()
+            if regression and regression == prev_regression:
+                ledger.record("escalation.raised", goal_id=spec.goal_id, feature_id=fid,
+                              root=root, reason_class="regression_repeated",
+                              reason="the same regression failed two attempts running, "
+                                     "so it is likely outside what this feature can "
+                                     "change (a test beyond touches, or one already "
+                                     "failing on base): " + ", ".join(sorted(regression))[:400],
+                              episode_ids=last_episode_ids, **span)
+                return 1
+            prev_regression = regression
             if review == "reject":
                 findings = [
                     {"severity": f.get("severity"), "file": f.get("file"),
@@ -1211,21 +1252,21 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
     # read-only: the suite judges the real checkout and must not write into it
     suite = run_contained(spec.suite, str(repo), None)
     final = ledger.read(root)
-    spend = _goal_spend(final)
+    spend = _goal_spend(final, board_task)
     if suite.returncode == 0:
         if spec.manual_checks:
             ledger.record("validation.automated_passed", goal_id=spec.goal_id,
-                          root=root, task=task_id,
+                          root=root, task=board_task,
                           checks=list(spec.manual_checks), **spend)
             if board_task:
                 _tasks.update(root, board_task, state="landed")
             return 0
         ledger.record("goal.finished", goal_id=spec.goal_id, root=root,
-                      outcome="scope_satisfied", task=task_id, **spend)
+                      outcome="scope_satisfied", task=board_task, **spend)
         note = _open_pr(spec, root, repo)
         if note:
             ledger.record("delivery.requested", goal_id=spec.goal_id, root=root,
-                          task=task_id, result=note)
+                          task=board_task, result=note)
             print(note)
         if board_task:
             # the PR number, so validation can say which tasks a PR carries
