@@ -18,7 +18,7 @@ def _isolate_and_stub(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("VASCULAR_HOME", str(tmp_path / "vascular"))
     monkeypatch.setenv("PLEXUS_DEV_ENV", "off")
-    monkeypatch.setenv("HEART_SANDBOX", "1")
+    monkeypatch.setenv("HEART_SANDBOX", "docker-sbx")
     monkeypatch.setattr("heart.sandbox.image_is_stale", lambda _i: None, raising=False)
     monkeypatch.setattr("plexus.sandbox._baked_heart_drift", lambda: None)
     monkeypatch.setattr(sandbox, "local_model_hosts", lambda: [])

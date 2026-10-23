@@ -33,6 +33,28 @@ INJECT_PORT = os.environ.get("HEART_SANDBOX_INJECT_PORT", "8889")
 IMAGE = os.environ.get("HEART_SANDBOX_IMAGE", "heart-agent:latest")
 
 
+def gate() -> str | None:
+    """Why agents or agent-written checks must not start here, or None.
+
+    Unset HEART_SANDBOX silently meant "on this host": four web-lane episodes
+    ran there unnoticed (F71), and approve judged criteria in the wrong place
+    (F79). heart's runner contains only `docker-sbx` and runs any other value
+    on the host, so `1` or a typo was a host run too (PLEXUS-B14). Saying `off`
+    out loud is still a supported choice. One function so the CLI and the
+    dashboard's in-process approve cannot drift apart."""
+    mode = os.environ.get("HEART_SANDBOX", "")
+    if mode == "docker-sbx":  # heart.runner.SANDBOX_MODE; heart isn't imported here
+        return None
+    if mode == "off":
+        print("WARNING: HEART_SANDBOX=off -- agents and their checks run on "
+              "this host, unsandboxed", file=sys.stderr)
+        return None
+    shown = f"HEART_SANDBOX={mode!r}" if mode else "HEART_SANDBOX is unset"
+    return (f"{shown}, so agents and their checks would run on this host "
+            "unsandboxed. Set HEART_SANDBOX=docker-sbx (with HEART_SANDBOX_IMAGE) "
+            "to sandbox them, or HEART_SANDBOX=off to run here on purpose.")
+
+
 def _inject_tls_port() -> str:
     """Read at call time, not import time: a module-level constant would bake
     in whatever the env held at first import, and leak into every test that
