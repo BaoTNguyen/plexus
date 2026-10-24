@@ -38,6 +38,16 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--task", default="",
                    help="task to run; omit to take the next ready one off the queue")
 
+    s = sub.add_parser("replay", help="re-run landed features from their base: pass rate, cost, lead time")
+    s.add_argument("set", nargs="?", default=str(Path(__file__).resolve().parents[2] / "evals" / "replay.json"),
+                   help="the replay set (default: evals/replay.json beside plexus)")
+    s.add_argument("--samples", type=int, default=1, help="runs per task")
+    s.add_argument("--holdout", action="store_true", help="the holdout tasks instead")
+    s.add_argument("--only", action="append", default=None, help="just this task id (repeatable)")
+    s.add_argument("--check", action="store_true",
+                   help="spend nothing: confirm each acceptance fails at base and passes where it landed")
+    s.add_argument("--keep", action="store_true", help="keep each sample's clone for inspection")
+
     s = sub.add_parser("amend", help="fix a not-yet-landed feature's criterion/spec in the plan")
     s.add_argument("feature", help="feature id to amend")
     s.add_argument("--root", default=".")
@@ -204,6 +214,10 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
         return run(load_spec(args.root), args.root, candidates=args.candidates,
                    task_id=args.task)
+    if args.cmd == "replay":
+        from . import replay
+        return replay.main(args.set, samples=args.samples, holdout=args.holdout, only=args.only,
+                           check_only=args.check, keep=args.keep)
     if args.cmd == "amend":
         from .plan import amend
         from .spec import load_spec
