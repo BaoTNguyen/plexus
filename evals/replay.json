@@ -1,0 +1,593 @@
+{
+ "about": "The replay set (DIRECTION \u00a75, F28): landed features re-run from their base commit through `plexus replay`, scored on pass rate, cost and lead time. Chosen 2026-10-23 for a spread over repos, attempts and cost; excluded: features whose checks need the live sandbox/TLS machinery, and docs- or vendoring-only work. `holdout` tasks are never tuned against: run them only to confirm a change that already won on the rest. `original` is how the feature went the first time. Every task was checked in the verifier image on 2026-10-23 (`plexus replay --check`): its acceptance fails at the base and passes where it landed. Most older plexus features can't be replayed: their tests pin heart APIs that have since changed, so plexus is under-represented until newer plexus work rotates in.",
+ "tasks": [
+  {
+   "id": "arteries:isolate-agent-recent-conversation",
+   "repo": "arteries",
+   "base": "f22f809d73018e2ccfbd601ebcabbd83b05696c7",
+   "landed": "fdc7412673721b59eca0b27224b0b438350dd729",
+   "holdout": false,
+   "feature": {
+    "title": "Omit Recent Conversation from sandboxed/unattended agent packets",
+    "spec": "In src/arteries/packet.py build_packet: add a small helper (e.g. _sandboxed_agent()) that is true when trust.agent_run() or trust.web_lane() is true, or ARTERIES_AGENT_ROLE is set to a non-empty value. When true, do not call _load_recent_pairs (so no pairs are drawn from the runlog or interactive sessions) and leave the \"Recent Conversation\" section out entirely. This must also hold on the compaction path if render_state can emit recent conversation text derived from recent pairs (check render_state; if it does, skip those pairs there too under the same condition). Other sections keep their existing trust rules. Interactive sessions (none of the variables set) are unchanged. Empty-packet rule: if the only sections left are the boilerplate \"Use Rules\" (no Current Context, memory, or suggestion content), return \"\" instead of a header-only packet; apply this only when the sandboxed condition is true so interactive output is unchanged. Add tests/test_packet_agent_isolation.py: monkeypatch.setenv ARTERIES_AGENT_ROLE=implement (one test) and ARTERIES_LANE=web (another), also ARTERIES_TRUST=untrusted; stub _load_recent_pairs (and _load_memories/_corpus_suggestion/_query_embedding as needed so no DB or network is touched) to return recognisable RecentPair text; assert build_packet output has no \"Recent Conversation\" and none of the stub text, and that with all variables cleared (monkeypatch.delenv) the section and stub text are present. Add a test that a sandboxed build with nothing else to say returns \"\". Write nothing into the checkout (use tmp_path, set VASCULAR_HOME to tmp_path if needed); no git, no network, no Postgres.",
+    "acceptance": "python3 -m pytest -q tests/test_packet_agent_isolation.py && python3 -m pytest -q",
+    "touches": [
+     "src/arteries/packet.py",
+     "tests/test_packet_agent_isolation.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "easy"
+   },
+   "original": {
+    "feature_id": "keep-interactive-conversation-out-of-san:isolate-agent-recent-conversation",
+    "attempts": 1,
+    "cost_usd": 0.8
+   }
+  },
+  {
+   "id": "arteries:pulse-read-socket",
+   "repo": "arteries",
+   "base": "291825cb54a01f938bbf853c02501b368062d6bf",
+   "landed": "09c697e8329eef85214a5883dcaa93103045abf8",
+   "holdout": false,
+   "feature": {
+    "title": "Stdlib pulse socket reader (pulse_read.events)",
+    "spec": "Add src/arteries/pulse_read.py, stdlib only (http.client over AF_UNIX). Model it on heart's pulse.py socket_events: subclass http.client.HTTPConnection and override connect() to open a socket.AF_UNIX stream to the socket path. The socket path is vascular_paths.path(\"state\", \"pulse\", \"pulse.sock\"), resolved at call time so VASCULAR_HOME set by a test applies. Public function: events(kind=None, project=None, source=None, order=\"asc\", before=None, limit=500, timeout=2.0) -> list[dict] | None. It issues one GET /events with urlencoded query params for kind, project, source, order, before and limit, leaving out any that are None. It returns one page: the body's `events` list (pulse also returns `next` in the body, which this function ignores). Each event keeps its `seq`. A `ts` string that ends in `Z` is rewritten to end in `+00:00`. Return None on any failure: socket missing, connect refused, timeout, non-200 status, unparseable JSON, or a body without an events list. Catch Exception broadly; it must never raise. Always close the connection. Add tests/test_pulse_read.py. Each test points VASCULAR_HOME at tmp_path and starts a throwaway AF_UNIX HTTP server on a thread, bound at <tmp_path>/state/pulse/pulse.sock (http.server.HTTPServer with a socketserver.UnixStreamServer-style subclass is fine; keep the path short, and fall back to a tempfile.mkdtemp('/tmp') dir plus monkeypatched path if AF_UNIX's 108-char limit bites). Cover: the happy path (query string carries kind/source/order/before/limit, seq kept, Z converted), no socket -> None, 500 status -> None, bad JSON -> None, and a server that never replies with timeout=0.2 -> None. No real pulse, nothing written into the checkout.",
+    "acceptance": "python3 -m pytest -q tests/test_pulse_read.py && PYTHONPATH=src VASCULAR_HOME=$(mktemp -d) python3 -c \"from arteries import pulse_read; assert pulse_read.events(kind='x') is None\"",
+    "touches": [
+     "src/arteries/pulse_read.py",
+     "tests/test_pulse_read.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "medium"
+   },
+   "original": {
+    "feature_id": "read-pulse-over-its-socket-and-dual-writ:pulse-read-socket",
+    "attempts": 2,
+    "cost_usd": 1.47
+   }
+  },
+  {
+   "id": "arteries:session-trace",
+   "repo": "arteries",
+   "base": "3329d02a5e893650a9d2166c09880fc6ad8fc560",
+   "landed": "685ab6c8ddf01482fadc34317cf1b17c0b33e65c",
+   "holdout": false,
+   "feature": {
+    "title": "journal_append derives trace_id from the Claude session when no parent trace is set",
+    "spec": "In src/arteries/journal.py, journal_append passes an explicit trace_id to pulse_emit.emit when the env var PULSE_TRACE_ID is unset or empty and ARTERIES_SESSION_ID is non-empty. The value is hashlib.sha256((\"claude:\" + session_id).encode()).hexdigest()[:32]. If PULSE_TRACE_ID is set, which happens when heart or plexus is the parent, journal_append passes no trace_id, so pulse_emit.event's env-derived value stays. With neither variable set, no trace_id field appears, as now. pulse_emit.event applies the fields after its env defaults, so passing trace_id= as an emit field is enough. Do NOT edit src/arteries/pulse_emit.py. Add tests/test_journal_trace.py. Point EVENT_JOURNAL_DIR at tmp_path and use monkeypatch for the env vars. (1) Session-only: two journal_append calls with ARTERIES_SESSION_ID=s1 produce lines whose trace_id equals sha256(b'claude:s1').hexdigest()[:32], and both lines share it. (2) Parent wins: with PULSE_TRACE_ID=abc and ARTERIES_SESSION_ID=s1 set, the line's trace_id == 'abc'. (3) Neither set: the line has no trace_id key. Read the journal lines back from tmp_path/*.ndjson, skipping context.started lines. Make sure ARTERIES_JOURNAL is not 'off' during the test.",
+    "acceptance": "python3 -m pytest -q tests/test_journal_trace.py",
+    "touches": [
+     "src/arteries/journal.py",
+     "tests/test_journal_trace.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "easy"
+   },
+   "original": {
+    "feature_id": "trace-hook-events-by-session-and-keep-we:session-trace",
+    "attempts": 2,
+    "cost_usd": 0.99
+   }
+  },
+  {
+   "id": "capillaries:load-secrets-file",
+   "repo": "capillaries",
+   "base": "6c11d77fc557e610fd80464967bdefbe42ee645c",
+   "landed": "ffc28d1a26a355690b72377c5a4cccf08bda7b83",
+   "holdout": false,
+   "feature": {
+    "title": "paths.py loads ~/.vascular/secrets/capillaries/env before .env",
+    "spec": "Goal: Read capillaries' credentials from ~/.vascular/secrets. `DB_PASSWORD`, `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` live in `vascular_paths.path(\"secrets\", \"capillaries\", \"env\")` (~/.vascular/secrets/capillaries/env), a dotenv-format file. Non-secret settings (DB_HOST, DB_PORT, DB_NAME, DB_USER, OBSIDIAN_VAULT_PATH, paths) stay in `.env`.\n\nIn `src/capillaries/config/paths.py`, inside the existing `try: from dotenv import load_dotenv` block, load the secrets file with python-dotenv BEFORE the existing `load_dotenv()`: `load_dotenv(vascular_paths.path(\"secrets\", \"capillaries\", \"env\"))`, then the existing `load_dotenv()`. The result is shell env > secrets file > .env, because load_dotenv never overrides a variable that is already set. A missing secrets file is fine: no error and no warning (load_dotenv returns False for a missing path). Do not pass override=True. `vascular_paths` is already imported as `from capillaries import vascular_paths`. Use the vendored `vascular_paths` (src/capillaries/vascular_paths.py) as-is: do not edit it. Update the module docstring to say credentials come from ~/.vascular/secrets/capillaries/env and everything else from .env.\n\nAdd `tests/test_secrets_load.py`. Each case runs in its own subprocess (`subprocess.run([sys.executable, '-c', ...])`) so module-level loading starts fresh. Set `cwd=tmp_path` so the `.env` that `load_dotenv()` finds is the test's own file under tmp_path and never the repo's. Pass `env` explicitly: a copy of os.environ with VASCULAR_HOME=<tmp_path/'vh'>, HOME=<tmp_path>, PYTHONPATH=<repo>/src, and DB_PASSWORD/OPENAI_API_KEY/ANTHROPIC_API_KEY removed unless the case sets one. The child imports `capillaries.config.paths` and prints `os.environ.get(KEY)`. Cases: (1) a key only in the secrets file is loaded; (2) a key in both the secrets file and tmp_path/.env takes the secrets file's value; (3) a key already in the subprocess environment beats both files; (4) with no secrets file, a key in .env still loads and the import does not fail. Skip the module if python-dotenv is not importable (`pytest.importorskip(\"dotenv\")`). Never read, create, copy or move real files under ~/.vascular, ~/.config or the repo's real .env. Tests use tmp dirs with VASCULAR_HOME set. Tests must not write into the checkout.",
+    "acceptance": "python3 -m pytest -q tests/test_secrets_load.py",
+    "touches": [
+     "src/capillaries/config/paths.py",
+     "tests/test_secrets_load.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "easy"
+   },
+   "original": {
+    "feature_id": "read-capillaries-credentials-from-vascul:load-secrets-file",
+    "attempts": 1,
+    "cost_usd": 0.64
+   }
+  },
+  {
+   "id": "capillaries:log-serving-event",
+   "repo": "capillaries",
+   "base": "90946e0556ba42650aa78fcccc26e5fb305d8cef",
+   "landed": "984a8c5fd8db314d0e79837927ff95ccca4e6956",
+   "holdout": false,
+   "feature": {
+    "title": "log_serving emits retrieval.served instead of inserting into serving_log",
+    "spec": "In src/capillaries/optimize/serving.py, rewrite log_serving so it never touches Postgres. Keep the signature `log_serving(query, served_kind, served_id, candidates, db_config=None, episode_id=None, turn_id=None)`; db_config is accepted for caller compatibility and ignored. Resolve episode_id/turn_id as today (the argument wins, then $ARTERIES_EPISODE_ID / $ARTERIES_TURN_ID). Build the same capped [{id, score}] list (MAX_CANDIDATES). Store the query with `pulse_emit.artifact(query.encode(), vascular_paths.journal_dir())`. Then call `spine.emit('retrieval.served', envelope_episode_id=episode_id, served_kind=..., served_id=..., candidates=capped, query_chars=len(query), query_artifact=<digest>, episode_id=..., turn_id=...)`, leaving episode_id and turn_id out of the payload when they are None. Wrap the whole function in try/except so it never raises. Update the module docstring: serving records are events now, and serving_log is a read-only archive (pulse P5). Leave DDL/INDEXES/apply_ddl alone in this feature. Add tests/test_serving_event.py using the journal fixture pattern from tests/test_pulse_envelope.py, with `serving.psycopg2.connect` monkeypatched to raise. The tests check four things: (1) one call writes exactly one line with kind 'retrieval.served', and its payload has served_kind, served_id, candidates capped to 10 when given 15, query_chars == len(query), episode_id and turn_id from the arguments, and the envelope episode_id set; (2) the file <journal>/artifacts/<query_artifact> holds query.encode() exactly, tested with a query of about 15000 characters; (3) with no episode_id/turn_id argument and the env vars unset, the payload has neither key, and with ARTERIES_EPISODE_ID set the env value is used; (4) when EVENT_JOURNAL_DIR points at a regular file, so the journal is unwritable, log_serving returns None without raising. In tests/test_serving_identity.py, replace test_log_serving_prefers_argument_over_env, which only checks a local helper, with a test that calls the real log_serving and checks that the emitted payload's episode_id is the argument even when ARTERIES_EPISODE_ID is set. In tests/test_optimize_m6.py, change ServingLogTests.test_log_serving_writes_row to check the emitted event under a tmp EVENT_JOURNAL_DIR instead of selecting from serving_log.",
+    "acceptance": "python3 -m pytest -q tests/test_serving_event.py tests/test_serving_identity.py",
+    "touches": [
+     "src/capillaries/optimize/serving.py",
+     "tests/test_serving_event.py",
+     "tests/test_serving_identity.py",
+     "tests/test_optimize_m6.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "medium"
+   },
+   "original": {
+    "feature_id": "move-serving-log-onto-pulse-events-and-a:log-serving-event",
+    "attempts": 1,
+    "cost_usd": 0.65
+   }
+  },
+  {
+   "id": "heart:envelope-goal-feature-ids",
+   "repo": "heart",
+   "base": "693e6d3fc805fc7d34aaafc6c7eccc508d9f101e",
+   "landed": "538277c98c8a5527ee25cb7803c136cd01936243",
+   "holdout": false,
+   "feature": {
+    "title": "events.emit sets envelope goal_id/feature_id alongside the payload copies",
+    "spec": "In src/heart/events.py, change `emit` so that once the goal lineage loop has resolved `payload[\"goal_id\"]` / `payload[\"feature_id\"]` (an explicit kwarg from the call site wins; otherwise $PLEXUS_GOAL_ID / $PLEXUS_FEATURE_ID when non-empty, exactly as today), it also passes them to `pulse_emit.emit` as the envelope keyword arguments `goal_id=` / `feature_id=`. Leave the payload copies untouched: plexus's tests and heart's `pulse.goal_timeline` read `payload.goal_id`. A missing or empty value must be passed as None, never as \"\", so pulse_emit.event drops the key and the line has no top-level goal_id/feature_id. Do NOT edit src/heart/pulse_emit.py (vendored, hash-checked) or any sandbox code. The golden files under tests/golden-events are checked for conformance only, not diffed against fresh output, so leave them alone.\n\nIn SPINE.md, in the goal lineage paragraph (the one that says heart \"stamps `payload.goal_id`/`payload.feature_id`\"), add one sentence: they are also set as the envelope's top-level `goal_id`/`feature_id`, which is what pulse queries by, and the payload copies stay for older readers.\n\nIn tests/test_heart.py, add tests whose names contain `envelope_goal`. Each one sets EVENT_JOURNAL_DIR and VASCULAR_HOME to tmp_path via monkeypatch, calls `heart.events.emit`, and reads the single NDJSON line from the journal dir:\n(1) with PLEXUS_GOAL_ID=g1 and PLEXUS_FEATURE_ID=f1, the line has top-level goal_id == \"g1\", feature_id == \"f1\", and payload.goal_id == \"g1\";\n(2) with the same env vars plus an explicit `goal_id=\"g2\"` kwarg, top-level goal_id and payload.goal_id are both \"g2\";\n(3) with both env vars deleted and no kwarg, the line has no top-level goal_id or feature_id key at all.",
+    "acceptance": "python3 -m pytest -q tests/test_heart.py -k envelope_goal && grep -q \"envelope's\" SPINE.md && python3 -m pytest -q",
+    "touches": [
+     "src/heart/events.py",
+     "tests/test_heart.py",
+     "SPINE.md"
+    ],
+    "needs_upstream": [],
+    "difficulty": "easy"
+   },
+   "original": {
+    "feature_id": "set-goal-id-and-feature-id-on-the-envelo:envelope-goal-feature-ids",
+    "attempts": 1,
+    "cost_usd": 0.83
+   }
+  },
+  {
+   "id": "heart:episode-role-spans",
+   "repo": "heart",
+   "base": "8fa6fc169135786345e94e9804fa6b763195a82e",
+   "landed": "4737d16771c911dc073d486352f4bae4bcce7f4c",
+   "holdout": false,
+   "feature": {
+    "title": "Episodes and roles open spans; in-episode events parent to the episode span",
+    "spec": "In src/heart/episode.py, put the trace and span handling in `run_episode`, the public wrapper. `_run_episode` emits episode.started and episode.finished, but episode.failed is emitted by run_episode's `except`, so the wrapper is the only place that covers all three. Put it around the try/except that calls `_run_episode`, before or after the routing.pick call (route.decided may go either way). Steps: (1) Save prev_trace = os.environ.get(\"PULSE_TRACE_ID\") and prev_parent = os.environ.get(\"PULSE_PARENT_SPAN\"). If prev_trace is unset or empty, set os.environ[\"PULSE_TRACE_ID\"] = os.urandom(16).hex(). (2) Generate ep_span = pulse_emit.new_span() (import pulse_emit from the package) and pass it into `_run_episode` with a new keyword parameter `ep_span: str | None = None`. (3) In `_run_episode`, emit episode.started with span_id=ep_span, then set os.environ[\"PULSE_PARENT_SPAN\"] = ep_span. Wrap the body from there to just before episode.finished in try/finally. The finally restores PULSE_PARENT_SPAN to its value from before (pop it if it was unset), so episode.finished, emitted with span_id=ep_span, keeps the caller's parent. (4) In run_episode, episode.failed gets span_id=ep_span. After the try/except, in a finally, restore PULSE_TRACE_ID (pop if prev_trace was unset or empty, else restore it) and restore PULSE_PARENT_SPAN to prev_parent (pop if None), as a backstop. (5) Roles: at the pipeline call site (role.started, around line 796), make role_span = pulse_emit.new_span(), emit role.started with span_id=role_span, and pass span_id=role_span to `_agent_turn`. Add `span_id: str | None = None` as the last parameter of `_agent_turn`. If it is None, generate one with pulse_emit.new_span(), so fix-loop and review turns get a span that only has a finish. Emit role.finished with span_id=span_id. parent_span_id stays implicit everywhere: pulse_emit reads it from $PULSE_PARENT_SPAN, which is ep_span inside the episode. Add a `ponytail:` comment where the env is set. It must say: process-global env, safe because one episode runs per process in this path; run_candidates' thread pool (n>1) shares os.environ and can mis-parent concurrent candidates' events; contextvars passed to events.emit are the upgrade if episodes ever run concurrently in one process. Tests in tests/test_heart.py, names containing `trace_span_episode`, reusing the setup of the existing roles test around line 217 (TestCase with self.runs, agent=\"shell\", a roles list). Point EVENT_JOURNAL_DIR and VASCULAR_HOME at a tmp dir and delete PULSE_TRACE_ID and PULSE_PARENT_SPAN for the test (patch.dict or monkeypatch, matching what the class uses). (a) `test_trace_span_episode_standalone`: run one episode with roles, then read every journal line whose episode_id matches. Assert: all lines share one trace_id matching ^[0-9a-f]{32}$. episode.started and episode.finished share one span_id S and have no parent_span_id. Every role.started has a role.finished with the same span_id, and both have parent_span_id == S. Every other line except episode.* and route.decided has parent_span_id == S. Afterwards PULSE_TRACE_ID and PULSE_PARENT_SPAN are not in os.environ. (b) `test_trace_span_episode_under_parent`: set PULSE_TRACE_ID=t-outer and PULSE_PARENT_SPAN=p-outer first. Assert every line has trace_id t-outer, episode.started has parent_span_id p-outer, and both env vars still hold t-outer/p-outer afterwards. (c) `test_trace_span_episode_failed_restores_env`: drive the existing crash path (as in test_episode_crash_emits_failed). Assert episode.failed has a span_id and both env vars are unset afterwards.",
+    "acceptance": "python3 -m pytest -q tests/test_heart.py -k 'trace_span_episode' && python3 -m pytest -q tests/test_heart.py",
+    "touches": [
+     "src/heart/episode.py",
+     "tests/test_heart.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "medium"
+   },
+   "original": {
+    "feature_id": "trace-and-span-ids-through-episodes-and-:episode-role-spans",
+    "attempts": 1,
+    "cost_usd": 1.11
+   }
+  },
+  {
+   "id": "heart:route-models-allowlist",
+   "repo": "heart",
+   "base": "7ab89fcdbee405c4db8471e4a427318784e5ffcf",
+   "landed": "ee78df1e2ef8f46fc5fe0da146a811833a0c7786",
+   "holdout": false,
+   "feature": {
+    "title": "routing.pick() considers only models named in models.json route_models",
+    "spec": "Add an optional top-level `route_models` list of model nicknames to models.json, next to `review_models`. Routing reads it; review does not. All changes live in src/heart/routing.py.\n\n1. Add `route_models() -> list[str]` in routing.py. It returns `load_models_json().get(\"route_models\")` when that value is a non-empty list of strings, and `[]` otherwise (absent, empty, or the wrong type). It must never raise.\n\n2. Give `pick()` a new keyword parameter `route_models: list[str] | None = None`. When it is None, pick reads `route_models()` itself. Callers that pass their own `manifest=` (orchestrate.py, episode.py) therefore obey the operator's list without changes, and so do `heart` and plexus's `auto`, which both go through pick. Passing `route_models=[]` explicitly turns the filter off. Do not change any caller. Do not touch review.py, review_models or review_agent.\n\n3. Inside pick, after the `if not manifest:` branch, resolve the allowlist against the manifest. Any name not in `manifest` gets a one-line warning on stderr, `heart: route_models: unknown model '<name>' ignored`, and is then dropped. If no known names remain, the allowlist counts as absent and behaviour is exactly what it is today. Otherwise, during the existing filter loop, every manifest entry outside the allowlist is skipped before any other check, with `filtered.append(f\"{name}:not in route_models\")`. That puts the entry in route.decided's `filtered` the same way the other filters do. Allowlisted entries run through the existing unavailable/context/difficulty filters and scoring unchanged, and `_best` still breaks ties toward the cheapest among them.\n\n4. Fallback when an allowlist is active and `scored` ends up empty: never pick a model outside the allowlist. Take the allowlisted entries that are available (availability is physical, so keep honouring `available`) and ignore the context and difficulty filters. Choose by highest `max_difficulty` rank, then largest `context`. Return it through `decided(...)` with effort \"high\", a reason starting `no model cleared constraints (` like today's fallback, and the full `filtered` list. With an allowlist active, this replaces the current `raise ValueError(\"no available model satisfies context constraints...\")`. Raise that ValueError only if no allowlisted entry is available. Without an allowlist, the existing fallback and raise stay byte-for-byte the same.\n\n5. Do not read or write ~/.vascular/config/heart/models.json in code or tests. The operator sets route_models there by hand.\n\n6. New file tests/test_route_models.py, pytest style. A module-level autouse fixture sets EVENT_JOURNAL_DIR and VASCULAR_HOME to tmp_path via monkeypatch, so route.decided events and config reads never touch the real ~/.vascular. The manifest stub, in the same raw shape tests/test_route_orchestrate.py uses: opus (agent \"claude\", cost 3.0), sol (agent \"api:sol\", cost 2.5), sonnet (agent \"api:sonnet\", cost 0.5), terra (agent \"api:terra\", cost 0.3). All four get skills {\"coding\": 0.9}, context 200_000 and max_difficulty \"hard\". Demands come from `routing.demand(TaskSpec(task_id=\"t\", repo_path=\".\", base_commit=\"x\", prompt=\"add a function\", skills=[\"coding\"], difficulty=...))`. To read `filtered`, monkeypatch `routing.emit` to capture kwargs. Tests:\n(a) route_models=[\"opus\",\"sol\"] at easy, medium and hard difficulty: the choice's name is never sonnet or terra, and the captured `filtered` contains \"sonnet:not in route_models\" and \"terra:not in route_models\".\n(b) route_models=[] (and, separately, None with no models.json under VASCULAR_HOME): picks terra, the cheapest on a tie, as today.\n(c) route_models=[\"opus\",\"nope\"]: picks opus, does not raise, and capsys shows a warning mentioning 'nope' on stderr. route_models=[\"nope\"] alone behaves like (b) and picks terra.\n(d) A manifest where opus and sol have context 32_000 and the demand has min_context=100_000, with route_models=[\"opus\",\"sol\"]: returns opus or sol, never sonnet or terra, and the reason starts with \"no model cleared constraints\". Also the difficulty variant: opus and sol at max_difficulty \"easy\" with a hard demand also returns one of opus or sol.\n(e) With no route_models argument, write `{\"models\": {...stub...}, \"route_models\": [\"opus\",\"sol\"]}` to the models.json path under the tmp VASCULAR_HOME (find the path via `heart.agents_api.models_json_path()`), then call `pick(want, manifest=routing.load_manifest())`: the result is opus or sol. This proves the config is read on the caller's manifest path.",
+    "acceptance": "python3 -m pytest -q tests/test_route_models.py && python3 -m pytest -q tests/test_route_orchestrate.py",
+    "touches": [
+     "src/heart/routing.py",
+     "tests/test_route_models.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "medium"
+   },
+   "original": {
+    "feature_id": "route-builders-only-among-an-allowlist-o:route-models-allowlist",
+    "attempts": 2,
+    "cost_usd": 1.81
+   }
+  },
+  {
+   "id": "heart:route-state-paths",
+   "repo": "heart",
+   "base": "323cd3d52c233a178cd20eaf172fd4f5742027de",
+   "landed": "a655d39fddead974c8f46dc90b765ab719191fa6",
+   "holdout": false,
+   "feature": {
+    "title": "Resolve models.json, workspaces, route stats, journal and runs dir under ~/.vascular at call time",
+    "spec": "Route every heart path outside a checkout through heart.vascular_paths, resolved when called (never at import), so a test can set VASCULAR_HOME and see it take effect.\n- src/heart/agents_api.py models_json_path(): return vascular_paths.path(\"config\", \"heart\", \"models.json\"). Remove the XDG_CONFIG_HOME/Path.home() lookup.\n- src/heart/env.py: delete the import-time WS_ROOT constant. _ws_root() returns Path(os.environ[\"HEART_WS_ROOT\"]) when set, else vascular_paths.path(\"cache\", \"heart\", \"ws\"). Update any comment or docstring in env.py that names WS_ROOT or ~/.cache/heart-ws.\n- src/heart/routing.py _stats_path(): keep the HEART_ROUTE_STATS override; the default becomes vascular_paths.path(\"state\", \"heart\", \"route_stats.json\").\n- src/heart/events.py: journal_dir() delegates to vascular_paths.journal_dir(), which already honours EVENT_JOURNAL_DIR. Update the module docstring's Journal line to `$EVENT_JOURNAL_DIR or ~/.vascular/state/heart/events/YYYYMMDD.ndjson`.\n- src/heart/cli.py: replace the WORK_RUNS_DIR constant with `def work_runs_dir() -> Path` returning vascular_paths.path(\"state\", \"heart\", \"runs\"). The argparse defaults that used str(WORK_RUNS_DIR) call str(work_runs_dir()) instead; the parser is built per invocation, which counts as call time. Update the help text that says 'default WORK_RUNS_DIR'.\n- src/heart/serve.py: stop importing WORK_RUNS_DIR. Keep the module-level RUNS_DIR attribute, because tests monkeypatch it, but have the serve entry point set it from cli.work_runs_dir() when no runs_dir is passed. Keep the lazy-import note accurate.\n- Leave sandbox.py and runner.py exactly as they are: the secrets dir, XDG_RUNTIME_DIR, the in-container env and expanduser calls all stay. Do not fall back to or migrate the old paths.\n- Add tests/test_vascular_paths.py. It uses monkeypatch to set VASCULAR_HOME=tmp_path and to delete HEART_WS_ROOT, HEART_ROUTE_STATS and EVENT_JOURNAL_DIR. It then asserts that agents_api.models_json_path() == tmp/config/heart/models.json, env._ws_root() == tmp/cache/heart/ws, routing._stats_path() == tmp/state/heart/route_stats.json, events.journal_dir() == tmp/state/heart/events and cli.work_runs_dir() == tmp/state/heart/runs. A second test checks that HEART_WS_ROOT, HEART_ROUTE_STATS and EVENT_JOURNAL_DIR still override.\n- If an existing test pinned the old locations (for example by setting XDG_CONFIG_HOME to redirect models.json), switch it to VASCULAR_HOME so the full suite still passes.",
+    "acceptance": "! grep -rnE 'Path\\.home\\(\\)|XDG_CONFIG_HOME|\\.local/share/heart|\\.cache/heart-ws' src/heart --include=*.py | grep -vE '^src/heart/(vascular_paths|sandbox|runner)\\.py:' && python3 -m pytest -q tests/test_vascular_paths.py && python3 -m pytest -q",
+    "touches": [
+     "src/heart/agents_api.py",
+     "src/heart/env.py",
+     "src/heart/routing.py",
+     "src/heart/events.py",
+     "src/heart/cli.py",
+     "src/heart/serve.py",
+     "tests/test_vascular_paths.py",
+     "tests/test_heart.py",
+     "tests/test_route_orchestrate.py",
+     "tests/conftest.py",
+     "tests/test_vascular*.py",
+     "tests/test_journal_contract.py",
+     "tests/test_local_slots.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "medium"
+   },
+   "original": {
+    "feature_id": "put-heart-s-state-under-vascular:route-state-paths",
+    "attempts": 3,
+    "cost_usd": 1.33
+   }
+  },
+  {
+   "id": "heart:skip-roles-on-blocked",
+   "repo": "heart",
+   "base": "8c9945e0c6115d52e5d2342c4168819598cc21c3",
+   "landed": "039ab304207ce2d5076c9bb749bd73669ac2cef0",
+   "holdout": false,
+   "feature": {
+    "title": "Skip test/review roles when implement writes PLEXUS_BLOCKED",
+    "spec": "In src/heart/episode.py, after the implement role finishes, check whether the worktree contains a PLEXUS_BLOCKED file. If it does, do not invoke any remaining roles (test, review, etc.). Record each remaining role in the episode's roles list as skipped with reason \"implement blocked\" (use the same skipped-role shape the roles list already uses, or add the minimal one if none exists), and finish the episode with the existing blocked outcome. If the file is absent, behaviour is unchanged and all roles run. Add tests/test_blocked_skips_roles.py using a stubbed role runner and a tmp_path worktree (no git against the checkout, no writes into the checkout, no network/DB): (1) implement writes PLEXUS_BLOCKED -> test and review runner never invoked, episode roles show them skipped with reason \"implement blocked\", outcome is blocked; (2) implement without the file -> all roles run as before. Finish with python3 -m pytest -q passing.\n\nReview findings from attempts 1-3 (all required):\n1. Check for PLEXUS_BLOCKED immediately after the implement agent's turn returns, BEFORE the implement role's verify/fix loop (episode.py ~line 827): a blocked implement must invoke no verifier and no fix agent, not just skip the later roles.\n2. In a scoped episode, PLEXUS_BLOCKED must yield the blocked outcome, never path_violation (episode.py ~line 921): exclude the marker file from the scope/path check, or decide blocked before that check runs.\n3. The unblocked regression test must assert that the test AND review roles both run.",
+    "acceptance": "python3 -m pytest -q tests/test_blocked_skips_roles.py && python3 -m pytest -q",
+    "touches": [
+     "src/heart/episode.py",
+     "tests/test_blocked_skips_roles.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "easy"
+   },
+   "original": {
+    "feature_id": "stop-the-pipeline-after-a-blocked-implem:skip-roles-on-blocked",
+    "attempts": 7,
+    "cost_usd": 5.99
+   }
+  },
+  {
+   "id": "plexus:escalation-cost",
+   "repo": "plexus",
+   "base": "64514ae6d1e971a039dfef65e3b1e4db0d8fedd5",
+   "landed": "582ac498b2f83ba3ef61560d85751908fcb693e6",
+   "holdout": false,
+   "feature": {
+    "title": "Stamp cost_usd on every escalation.raised that ends an attempt",
+    "spec": "In src/plexus/run.py, every escalation.raised written after an attempt's episode was built must carry that attempt's usage, i.e. **attempt_cost from _episode_cost(cands), the same keys feature.failed carries: cost_usd, tokens_in, tokens_out, cache_*. This covers blocked_on_decision, attempts_exhausted raised from the blocked branch (the in-loop one, not the post-loop one, which follows a feature.failed that already carries the cost), scope_violation, both held_for_review sites, and seat_exhausted. For seat_exhausted, give _check_seat_exhausted a `cost: dict | None = None` parameter, spread it onto its escalation.raised, and pass attempt_cost from _walk_plan. sandbox_unavailable has no episode, so it stays unpriced (a missing key means unknown, not zero). Held escalations keep writing held_cost as well, because ledger fields are additive-only. Once the held escalation carries cost_usd, nothing else may count that attempt again. _land_held must stop spreading the held cost onto its feature.landed record (it keeps from_held=ep_id) and onto its held_stale escalation.raised. After this change, summing cost_usd over every ledger record counts each attempt exactly once. Update the comment above the held_for_review record that currently says 'not cost_usd'. In LEDGER.md, add cost_usd/tokens_* to the escalation.raised row with a note: present when the escalation ends an attempt that ran an episode; absent for sandbox_unavailable and goal-level escalations; a from_held feature.landed carries no cost because the held escalation already did. Add tests/test_escalation_cost.py that drives plexus.run._walk the way tests/test_unreviewed_land.py does: a scratch git repo under tmp_path, chdir to tmp_path, heart's build stubbed so the episode usage is {\"cost_usd\": 0.25, \"tokens_in\": 10, \"tokens_out\": 5}. Cover three cases: (a) a blocked episode (outcome=\"blocked\", blocked_reason set), (b) a diff outside the feature's touches (scope_violation), (c) a held feature (review_hold containing its class). Each case asserts the final escalation.raised has cost_usd == 0.25. For (c), resolve the hold with ledger.resolve and run again, then assert the from_held feature.landed has no cost_usd and the sum of cost_usd over all records is 0.25.",
+    "acceptance": "python3 -m pytest -q tests/test_escalation_cost.py",
+    "touches": [
+     "src/plexus/run.py",
+     "LEDGER.md",
+     "tests/test_escalation_cost.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "medium"
+   },
+   "original": {
+    "feature_id": "make-insights-count-every-attempt-and-it:escalation-cost",
+    "attempts": 1,
+    "cost_usd": 1.23
+   }
+  },
+  {
+   "id": "plexus:insights-attempt-counts",
+   "repo": "plexus",
+   "base": "5e11c9f48ebd53c88e2203314a690328843dcc6f",
+   "landed": "64d2817b24ad6cede07f7ec28154cd38fe953617",
+   "holdout": false,
+   "feature": {
+    "title": "Count every started attempt in insights/report, with per-task outcomes and spend",
+    "spec": "In src/plexus/observe.py, add attempt_outcomes(recs: list[dict]) -> list[dict]. It returns one dict per feature.started record: {goal_id, task, feature_id, attempt, outcome, cost_usd, tokens_in, tokens_out}. task is the feature_id prefix before ':' or '(none)' when there is no ':'. The attempt is settled by the first of these records for the same (goal_id, feature_id) after its feature.started and before that feature's next feature.started. feature.landed gives landed. feature.failed gives failed. For escalation.raised, the outcome follows reason_class: held_for_review or held_stale give held, scope_violation gives scope, and any other reason_class gives blocked. If nothing settles it, the outcome is crashed. A later feature.landed with from_held=<episode> relabels the held attempt whose escalation named that episode in episode_ids as landed, without adding cost. cost_usd/tokens come from the settling record; legacy held escalations without cost_usd fall back to held_cost; if neither exists, the value is None (unknown). Rewrite insights() so the per-attempt numbers come from attempt_outcomes. Keep the existing 'goals:' line, then add one totals line and one line per task in first-seen order, always printing all six buckets. Totals line: `attempts: started=N landed=N failed=N blocked=N held=N scope=N crashed=N cost=$X.XXXX`. Task lines: `  task <task>: started=N landed=N failed=N blocked=N held=N scope=N crashed=N cost=$X.XXXX`. The existing 'cost:' line sums cost/tokens over attempts rather than over every ledger record. In report(), _metrics takes spend from attempt_outcomes for that goal and gains an 'attempts' count; add an `attempts` column between esc/feat and landed. Add tests/test_insights_counts.py. It writes a synthetic ledger to <tmp>/.vascular/plexus/ledger.jsonl. Use pytest's tmp_path, or tempfile.mkdtemp() when the file runs as a script, and set EVENT_JOURNAL_DIR to a tmp dir before importing plexus. The ledger has goal g with features in two tasks. t1:a has attempt 1 feature.failed cost_usd 0.5 and attempt 2 feature.landed cost_usd 1.0. t1:b has attempt 1 escalation.raised held_for_review cost_usd 0.25. t2:c has attempt 1 escalation.raised blocked_on_decision cost_usd 0.5, and attempt 2 is started with nothing after it (crashed). t2:d has attempt 1 escalation.raised scope_violation cost_usd 0.1. Every attempt has a feature.started record with increasing ts. The test asserts the per-task counts and spend through attempt_outcomes and that the insights lines below appear. A second case covers held-then-landed-from-held: it counts as landed, with its cost counted once. A third case asserts that report() shows attempts=6 for g. Under `if __name__ == \"__main__\":` the file builds the same ledger in a tempdir, prints observe.insights(root) one line per entry, and runs its test functions.\nexpect:\n$ PYTHONPATH=src python3 tests/test_insights_counts.py\nattempts: started=6 landed=1 failed=1 blocked=1 held=1 scope=1 crashed=1 cost=$2.3500\n  task t1: started=3 landed=1 failed=1 blocked=0 held=1 scope=0 crashed=0 cost=$1.7500\n  task t2: started=3 landed=0 failed=0 blocked=1 held=0 scope=1 crashed=1 cost=$0.6000",
+    "acceptance": "python3 -m pytest -q tests/test_insights_counts.py && PYTHONPATH=src python3 tests/test_insights_counts.py | grep -F 'attempts: started=6 landed=1 failed=1 blocked=1 held=1 scope=1 crashed=1 cost=$2.3500'",
+    "touches": [
+     "src/plexus/observe.py",
+     "tests/test_insights_counts.py",
+     "tests/test_plexus.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "medium"
+   },
+   "original": {
+    "feature_id": "make-insights-count-every-attempt-and-it:insights-attempt-counts",
+    "attempts": 3,
+    "cost_usd": 2.71
+   }
+  },
+  {
+   "id": "plexus:test-journal-isolation",
+   "repo": "plexus",
+   "base": "c7d69eb8126fafc5d9270b25fd7fb37fdae8d37b",
+   "landed": "64514ae6d1e971a039dfef65e3b1e4db0d8fedd5",
+   "holdout": false,
+   "feature": {
+    "title": "Point every test's event journal at a tmp dir",
+    "spec": "Add tests/conftest.py with an autouse fixture that always sets EVENT_JOURNAL_DIR to a directory under pytest's tmp base (tmp_path_factory.getbasetemp() / \"journal\"), using monkeypatch.setenv. It must override any value already in the environment, including the setdefault calls some test modules make at import time (tests/test_sandbox_start_retry.py, tests/test_unreviewed_land.py). That way plexus's own tests never append fake goals such as `g1` to the real ~/.vascular events spool. Remove the now-redundant `os.environ.setdefault(\"EVENT_JOURNAL_DIR\", ...)` lines from test modules only where the script-mode entry points (python3 tests/test_plexus.py, python3 tests/test_review.py) do not depend on them. Those two files keep their own module-level assignment, because conftest does not run when they are executed as scripts. Add tests/test_journal_isolation.py with two tests. The first asserts that Path(os.environ[\"EVENT_JOURNAL_DIR\"]).resolve() is inside tmp_path_factory.getbasetemp().resolve(). The second sets EVENT_JOURNAL_DIR to some other value with monkeypatch inside the test, emits one event through plexus.events.emit, and asserts that nothing was created under a VASCULAR_HOME it pointed at tmp_path / \"home\". Concretely, it checks that the fixture's journal dir received the file and the fake home's spool/events did not; the in-test override happens after this, so it is only used for the first check order. Keep the fixture to a few lines.",
+    "acceptance": "python3 -m pytest -q tests/test_journal_isolation.py",
+    "touches": [
+     "tests/conftest.py",
+     "tests/test_journal_isolation.py",
+     "tests/test_sandbox_start_retry.py",
+     "tests/test_unreviewed_land.py",
+     "tests/test_retry_context_resolve.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "easy"
+   },
+   "original": {
+    "feature_id": "make-insights-count-every-attempt-and-it:test-journal-isolation",
+    "attempts": 2,
+    "cost_usd": 0.71
+   }
+  },
+  {
+   "id": "pulse:collect-pass",
+   "repo": "pulse",
+   "base": "5254aca838f0e99040ddf6844b7aa1bb11de4089",
+   "landed": "0b2e40d9de5da3211c5c735cdb760c6671857bff",
+   "holdout": false,
+   "feature": {
+    "title": "collect::pass: one collector pass that never loses or duplicates an event",
+    "spec": "Add a new module `src/collect.rs` and declare it in `src/lib.rs` as `pub mod collect;`. Add no dependencies; Cargo.toml and Cargo.lock must not change. Don't edit contract/, sql/, src/store.rs, src/spool.rs or src/ingest.rs.\n\nExisting APIs you build on:\n- `pulse::spool::read_new(dir: &Path, checkpoints: &HashMap<String, u64>, max_lines: usize) -> std::io::Result<(Vec<Line>, HashMap<String, u64>)>`: reads complete lines (only through the last '\\n'; a partial last line is left for later) from day files named `YYYYMMDD.ndjson` in `dir`, past the per-file byte checkpoints, up to max_lines in total. Returns the lines and the new checkpoint of every file it touched. `Line { pub file: String /* day file name only */, pub offset: u64 /* byte offset of first byte */, pub bytes: Vec<u8> /* without the '\\n' */ }`.\n- `pulse::ingest::ingest(file: &str, offset: u64, bytes: &[u8]) -> Ingested` with `enum Ingested { Event(EventRow), Quarantine(QuarantineRow) }`. `EventRow.context: Option<ContextRow>` is Some for a `context.started` line carrying a context_id. Lines without an `id` get `uuid5(file:offset)`, so two identical legacy lines at different offsets get different ids.\n- `pulse::store::{Store, Batch, StoreError, MemoryStore}`: `trait Store { fn checkpoints(&mut self) -> Result<HashMap<String,u64>, StoreError>; fn commit(&mut self, batch: &Batch) -> Result<(), StoreError>; }`, `Batch { events: Vec<EventRow>, contexts: Vec<ContextRow>, quarantine: Vec<QuarantineRow>, checkpoints: HashMap<String,u64> }` (derives Default), commit all-or-nothing, duplicate ids / (file, offset) are silent no-ops. `StoreError(pub String)` implements `From<std::io::Error>`. `MemoryStore` has public fields `events`, `contexts`, `quarantine`, `checkpoints` and `fail_next: usize` (while > 0, each commit decrements it, stores nothing and errors).\n\nImplement:\n- `#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)] pub struct PassStats { pub events: usize, pub quarantined: usize, pub contexts: usize }` \u2014 counts the rows in the batches this pass committed successfully (rows the store dropped as duplicates still count; nothing from a failed commit counts).\n- `pub fn pass(store: &mut impl Store, journal_dir: &Path, batch_lines: usize) -> Result<PassStats, StoreError>`: read checkpoints from the store once; loop: `spool::read_new(journal_dir, &checkpoints, batch_lines)?`; if no lines, stop and return the stats; otherwise ingest each line into a Batch (event rows to `events`, and if `row.context` is Some, a clone of it to `contexts`; quarantine rows to `quarantine`), set `batch.checkpoints` to the map read_new returned, `store.commit(&batch)?` \u2014 on error return it immediately (the checkpoint did not move, so the next pass re-reads the same lines) \u2014 then merge the new checkpoints into the local map (`extend`), add to the stats, and repeat. A bad line never stops the pass. Guard `batch_lines == 0` so it doesn't loop forever (read_new returns nothing, so the loop just ends).\n\nAdd `tests/collect.rs` using MemoryStore over a fresh scratch dir under `std::env::temp_dir()` (unique per test: test name + process id + nanos; never write into the checkout), day files named like `20261013.ndjson`, synthetic lines only, e.g. `{\"ts\":\"2026-06-15T08:30:00Z\",\"source\":\"heart\",\"kind\":\"x.y\",\"id\":\"<uuid>\"}`. Use a small batch_lines (e.g. 2) so several batches run. Tests:\n1. every line lands once: N lines across two day files \u2192 store.events has N rows with N distinct ids and PassStats.events == N; checkpoints equal each file's length.\n2. running pass twice adds nothing: second pass returns PassStats::default() and the store is unchanged.\n3. two identical legacy lines (no `id`) both survive as two events with different ids.\n4. a failed commit loses nothing: set `fail_next = 1`, pass returns Err, store holds no rows and no checkpoints; the next pass delivers every line exactly once. Also: fail on the second batch (commit one batch first, e.g. batch_lines 2 with 4 lines and fail_next set after a first pass on only 2 lines, or equivalent) and check the retry ends with each line exactly once.\n5. a partial last line (no trailing newline) is not ingested and not quarantined; after appending the rest plus '\\n', the next pass ingests it once.\n6. bad lines (`not json`, and a JSON object missing `kind`) are quarantined with their file and offset, and the valid lines after them still land; a second pass adds no quarantine rows.\n7. context.started fills contexts once even when seen twice: two lines `{\"ts\":\"2026-06-15T08:30:00Z\",\"source\":\"heart\",\"kind\":\"context.started\",\"context_id\":\"ctx-1\",\"payload\":{\"host\":\"box\"}}` (no id, so two events) \u2192 store.events has 2 rows, store.contexts has exactly 1 with id \"ctx-1\"; a second pass leaves it at 1.",
+    "acceptance": "cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked --test collect",
+    "touches": [
+     "src/collect.rs",
+     "src/lib.rs",
+     "tests/collect.rs"
+    ],
+    "needs_upstream": [],
+    "difficulty": "medium"
+   },
+   "original": {
+    "feature_id": "store-trait-in-memory-store-and-the-coll:collect-pass",
+    "attempts": 1,
+    "cost_usd": 0.7
+   }
+  },
+  {
+   "id": "pulse:envelope-validation",
+   "repo": "pulse",
+   "base": "a2303bb48dadbdca92ce1a353ed5c43a7520d48a",
+   "landed": "558a410eb310488ff6da4dbc29ecc6e39379e0d2",
+   "holdout": false,
+   "feature": {
+    "title": "Parse and validate an event line against contract/envelope.json, with synthetic example files",
+    "spec": "Pulse is a Rust crate (edition 2024, toolchain 1.99.0). Implement P1's envelope validator in src/envelope.rs, export it from src/lib.rs with `pub mod envelope;` (keep the existing doc comment), and add synthetic example files plus the integration test tests/envelope.rs.\n\nHARD CONSTRAINTS:\n- Dependencies: only serde and serde_json, already in Cargo.toml and baked into the verifier image. No other crate, not even a dev-dependency: the verifier has no network. If something seems to need one, stop and ask (PLEXUS_BLOCKED). Do not touch Cargo.toml or Cargo.lock.\n- Do not edit contract/envelope.json or contract/observed.json. They are inputs.\n- This repo is public: every example line is synthetic. Use made-up ids, paths like /work/demo, and short invented text. Never copy anything that looks like a real journal line.\n- Always `cargo ... --locked`. Tests write nothing into the checkout, run no git, and use no network. Read files relative to env!(\"CARGO_MANIFEST_DIR\").\n\nINPUT: contract/envelope.json has a `required` map (field name -> type name), an `optional` map (same shape), a `types` map describing each type name, and a `rules` list. Currently required = ts:timestamp, source:name, kind:kind; optional includes id:uuid, schema_version:integer, emitter_seq:integer, duration_ms:number, origin:origin, payload:object and many `string` fields. Read the file itself for the full list.\n\nREQUIREMENTS:\n1. envelope.json drives the validator: embed it with `include_str!(\"../contract/envelope.json\")` and read its `required` and `optional` maps at runtime, parsed once (std::sync::OnceLock). Adding a field to the JSON must change behaviour with no Rust edit. Only the type names (`string`, `integer`, `number`, `object`, `uuid`, `timestamp`, `name`, `kind`, `origin`) are implemented in code. An unknown type name in the JSON must panic during that one-time parse with a message naming the type, so any test that calls parse_line fails (an unknown type is a test failure, not a silent pass).\n2. `pub fn parse_line(line: &str) -> Result<Event, EnvelopeError>`. `pub struct Event { pub ts: String, pub source: String, pub kind: String, pub fields: serde_json::Map<String, serde_json::Value> }` where `fields` holds ALL top-level fields of the line exactly as parsed (ts/source/kind and unknown fields included: skip and retain). Derive Debug and Clone on Event.\n3. Implement each rule in envelope.json's `rules` list:\n   - A line that is not valid JSON -> not_json. Valid JSON that is not an object -> not_object.\n   - A required field that is missing or null -> missing_field.\n   - An optional field that is null counts as absent (accepted, no check).\n   - Any present field of the wrong JSON type -> wrong_type. For uuid/timestamp/name/kind/origin a non-string value is wrong_type; a string in the wrong format gives the specific code (bad_uuid, bad_timestamp, bad_name, bad_kind, bad_origin).\n   - `integer`: serde_json `as_u64()` is Some (so negatives and 3.5 are wrong_type). `number`: a JSON number >= 0, else wrong_type. `object`: JSON object. `string`: JSON string.\n   - Unknown top-level fields are kept, never rejected. Unknown kinds are accepted (no catalog check here). Absent origin means unknown; nothing to store (downstream exports decide).\n   Check fields in order: required map then optional map, return the first error.\n4. Check formats by hand (no regex crate):\n   - timestamp: `YYYY-MM-DDTHH:MM:SS`, an optional `.` plus 1-9 digits, then `Z` or `+hh:mm`/`-hh:mm`. `T` and `Z` uppercase only. Month 01-12, day 01-31, hour 00-23, minute 00-59, second 00-59, offset hh 00-23 and mm 00-59. Nothing else may follow.\n   - uuid: 8-4-4-4-12 hex digits (either case) separated by `-`, 36 chars total.\n   - name: matches ^[a-z][a-z0-9_-]*$\n   - kind: matches ^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$ (at least two dot-separated segments, each starting with a lowercase letter).\n   - origin: exactly \"operator\", \"agent\" or \"external\".\n   Expose these as `pub fn is_timestamp(s: &str) -> bool`, `pub fn is_uuid(s: &str) -> bool`, `pub fn is_name(s: &str) -> bool`, `pub fn is_kind(s: &str) -> bool` (a later catalog feature uses is_name and is_kind).\n5. `pub enum EnvelopeError` (derive Debug, Clone, PartialEq) with variants carrying the field name where one applies, a stable `pub fn code(&self) -> &'static str` returning exactly one of: `not_json`, `not_object`, `missing_field`, `wrong_type`, `bad_timestamp`, `bad_uuid`, `bad_name`, `bad_kind`, `bad_origin`. Implement Display so the message names the field (e.g. `wrong_type: field \"emitter_seq\" ...`; for not_json/not_object say `line`). Implement std::error::Error.\n6. Example files (synthetic only), newline-delimited JSON, one event per line:\n   - contract/examples/valid/*.ndjson, a few files (e.g. basic.ndjson, optional.ndjson, edge.ndjson), at least 20 non-empty lines total. Cover every optional field in envelope.json at least once, an unknown top-level field, an unknown kind, a null payload, origin \"operator\", \"agent\" and \"external\", ts with `Z`, with `+00:00` and with fractional seconds.\n   - Every valid line's (source, kind) pair must either appear as a pair in contract/observed.json, or its kind must start with `example.` (use `example.` kinds for deliberately unknown kinds, e.g. `example.widget.spun`).\n   - contract/examples/invalid/<code>.ndjson for each of the nine codes (e.g. invalid/bad_kind.ndjson), at least 2 non-empty lines each, every line failing with exactly that file's code.\n7. tests/envelope.rs (integration test, uses `pulse::envelope`):\n   - Reads every contract/examples/valid/*.ndjson; each non-empty line must parse (failure message names file and line number).\n   - Every valid line's (source, kind) is in contract/observed.json (parse it with serde_json: `{\"kinds\": [{\"source\", \"kind\", ...}]}`) or the kind starts with `example.`.\n   - Reads every contract/examples/invalid/<code>.ndjson; each non-empty line must fail with `code()` equal to the file stem. Asserts at least one invalid file exists per code (all nine) and that no invalid file has a stem outside the nine.\n   - Unit-level cases: unknown field retained in `fields`; unknown kind accepted; null optional (e.g. payload: null, emitter_seq: null) accepted; `Z` and `+00:00` both accepted; fractional seconds accepted; `2026-13-01T00:00:00Z` rejected with bad_timestamp; missing ts gives missing_field; negative emitter_seq gives wrong_type; Display of an error contains the field name.\n8. Run `cargo fmt` and fix every clippy warning.",
+    "acceptance": "cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked --test envelope",
+    "touches": [
+     "src/lib.rs",
+     "src/envelope.rs",
+     "tests/envelope.rs",
+     "contract/examples/valid/*.ndjson",
+     "contract/examples/invalid/*.ndjson"
+    ],
+    "needs_upstream": [],
+    "difficulty": "medium"
+   },
+   "original": {
+    "feature_id": "define-the-event-contract-in-rust:envelope-validation",
+    "attempts": 2,
+    "cost_usd": 1.98
+   }
+  },
+  {
+   "id": "pulse:http-wire",
+   "repo": "pulse",
+   "base": "cf8489918ee1ff803b085a7b3d8d8b6e4a8c56b2",
+   "landed": "eb304ffbb6655e5f06ddd3a7be1bbce8fe959c09",
+   "holdout": false,
+   "feature": {
+    "title": "src/http.rs: minimal HTTP/1.1 GET over a Unix socket (server parse/respond + client get)",
+    "spec": "Add a new module `src/http.rs` and declare it in `src/lib.rs` as `pub mod http;`. Insert it in alphabetical order among the existing `pub mod` lines (artifacts, catalog, collect, envelope, ingest, paths, pg, spool, store), so it goes between `envelope` and `ingest`. Use std only. Cargo.toml must not change, and no dependency may be added (the verifier has no network). Do not touch contract/ or sql/. This is the wire layer for pulse's query API (PLAN.md P4). The API is plain HTTP/1.1, GET only, one request per connection, served one connection at a time on a Unix socket. Routing, handlers and the CLI belong to later tasks; do not build them here. Give the module a short `//!` doc comment in the same style as the other modules.\n\nPublic surface:\n\n1. `pub struct Request { pub path: String, pub query: Vec<(String, String)> }`. Derive Debug, Clone, PartialEq, Eq. `path` is the request target before any `?`, percent-decoded. A `+` in the path stays a literal `+`. `query` holds the pairs after `?` in their original order. Split on `&` and skip empty pieces. Split each piece on its first `=`; a piece without `=` becomes (key, \"\"). Keys and values are percent-decoded, and `+` decodes to a space. After percent-decoding, the bytes must be valid UTF-8. A repeated key keeps every occurrence.\n\n2. `pub enum HttpError { Method(String), BadRequest(String) }`. Derive Debug. `Method` carries the refused method name. Implement `std::fmt::Display` with a human-readable message, e.g. `method not allowed: POST` or `bad request: <reason>`. Also implement `std::error::Error`.\n\n3. `pub fn read_request(r: &mut impl BufRead) -> Result<Request, HttpError>`:\n   - Read the request line, then header lines, up to and including the first empty line. A line may end in CRLF or a bare LF; strip the trailing `\\r` if present.\n   - The whole header section (request line plus headers plus terminators) is capped at 16 KiB (16384 bytes). Enforce the cap while reading, e.g. via `Read::take` on a running budget, so an endless line never buffers unbounded memory. Going over the cap returns `HttpError::BadRequest`.\n   - EOF before the blank line returns `BadRequest`, as does an I/O error (put the error text in the message). The same goes for a request line that is not exactly three space-separated parts `METHOD TARGET VERSION`, a VERSION that doesn't start with `HTTP/1.`, a target that doesn't start with `/`, and non-UTF-8 header bytes.\n   - A well-formed request line whose method is not exactly `GET` returns `HttpError::Method(method)`.\n   - Invalid percent-encoding in the path or query returns `BadRequest`. That covers `%` not followed by two hex digits (e.g. `%zz`, or a trailing `%` or `%4`) and decoded bytes that aren't valid UTF-8.\n   - Ignore header contents, and never read a body.\n\n4. `pub fn write_response(w: &mut impl Write, status: u16, content_type: &str, body: &[u8]) -> std::io::Result<()>`. Write exactly `HTTP/1.1 {status} {reason}\\r\\nContent-Type: {content_type}\\r\\nContent-Length: {body.len()}\\r\\nConnection: close\\r\\n\\r\\n`, then the body bytes, then flush. Reasons: 200 `OK`, 400 `Bad Request`, 404 `Not Found`, 405 `Method Not Allowed`, 500 `Internal Server Error`, 503 `Service Unavailable`. Any other status gets `Unknown`.\n\n5. `pub fn encode(s: &str) -> String` percent-encodes a query value for callers building URLs. Pass the unreserved bytes `A-Z a-z 0-9 - . _ ~` through unchanged and write every other byte of the UTF-8 encoding as `%XX` with uppercase hex. A space becomes `%20`. The result must round-trip through read_request's query decoding.\n\n6. `pub fn get(socket: &std::path::Path, path_and_query: &str) -> std::io::Result<(u16, Vec<u8>)>`. This is the client side.\n   - Connect a `std::os::unix::net::UnixStream` to `socket` and write `GET {path_and_query} HTTP/1.1\\r\\nHost: pulse\\r\\nConnection: close\\r\\n\\r\\n`.\n   - Wrap the stream in a BufReader. Read the status line `HTTP/1.x <code> <reason>` and parse the code as u16, then read header lines (CRLF or bare LF) up to the blank line. Match `Content-Length` case-insensitively and trim its value.\n   - With a Content-Length, read exactly that many bytes (read_exact). Without one, read to EOF.\n   - A malformed status line or an unparsable Content-Length returns `io::Error` of kind `InvalidData`.\n   - Return (status, body). The body is raw bytes and may contain any byte values.\n\nTests: create `tests/http.rs` (integration tests using `pulse::http::*`; use only std). Cover:\n   (a) Parse `GET /events?kind=a.b&project=my%20proj&x=1+2 HTTP/1.1\\r\\nHost: pulse\\r\\n\\r\\n` from a `std::io::Cursor`. Expect path `/events` and query `[(\"kind\",\"a.b\"),(\"project\",\"my proj\"),(\"x\",\"1 2\")]`.\n   (b) A bare-LF request (`GET /health HTTP/1.1\\nHost: x\\n\\n`) parses to path `/health` with an empty query.\n   (c) `POST /events HTTP/1.1\\r\\n\\r\\n` returns `Err(HttpError::Method(m))` with m == \"POST\".\n   (d) A request whose header section exceeds 16 KiB is refused with `BadRequest`. Use, e.g., one header line of 17000 `a` characters followed by a blank line.\n   (e) `GET /events?kind=%zz HTTP/1.1\\r\\n\\r\\n` returns `BadRequest`, and so does a trailing `%4`.\n   (f) The exact bytes of `write_response` for status 200, content type `application/json` and body `{}`: `HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\n{}`. Also check that 404 yields the `HTTP/1.1 404 Not Found\\r\\n` prefix.\n   (g) `encode(\"my proj/a&b=c+\u00e9\")` is `my%20proj%2Fa%26b%3Dc%2B%C3%A9`, and it round-trips through read_request as a query value.\n   (h) Round trip. Bind a `std::os::unix::net::UnixListener` at a short unique path under `std::env::temp_dir()`, e.g. `pulse-http-{pid}-{n}.sock`, keeping the path under 100 bytes. Remove any stale file first. Spawn a thread that accepts one connection, wraps it in a BufReader, calls read_request, and answers with write_response. Make the status and body depend on the parsed request: for example, path `/bin` answers 200 with body bytes `[0u8, 127, 128, 200, 255]` plus the decoded `x` query value. Call `get(&sock, \"/bin?x=\" + &encode(\"a b\"))` and assert the status and exact body bytes. Do a second connection or listener that answers 404, and assert `get` returns 404. Join the thread and remove the socket file afterwards.\n   Tests must never write into the checkout or run git, and need no network or Postgres.\n\nAcceptance runs from the repository root: `cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked --test http`. The existing suite must keep passing too.",
+    "acceptance": "cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked --test http",
+    "touches": [
+     "src/http.rs",
+     "src/lib.rs",
+     "tests/http.rs"
+    ],
+    "needs_upstream": [],
+    "difficulty": "medium"
+   },
+   "original": {
+    "feature_id": "minimal-http-over-a-unix-socket:http-wire",
+    "attempts": 2,
+    "cost_usd": 1.52
+   }
+  },
+  {
+   "id": "pulse:ingest-line",
+   "repo": "pulse",
+   "base": "39ea44f9b27ac1b1f9e87900142846fa88c35085",
+   "landed": "b5c94ade6ecc8b375b8706b4ee531277ed2bbbed",
+   "holdout": false,
+   "feature": {
+    "title": "src/ingest.rs: map one spool line to an EventRow (plus ContextRow) or a QuarantineRow",
+    "spec": "Add a module that turns one spool line into the rows the collector will insert. P3 of PLAN.md. Read sql/schema.sql (tables events, contexts, quarantine) and src/envelope.rs before starting. Do NOT edit contract/, sql/, Cargo.toml or Cargo.lock, and add no dependencies: only serde, serde_json, postgres, sha2, uuid (features v5, serde) and zstd are available, and the verifier has no network. Pure code: no I/O, no Postgres.\n\n1. In src/lib.rs, add `pub mod ingest;` next to the existing modules.\n\n2. Create src/ingest.rs containing:\n\n- `pub const PULSE_LEGACY_NAMESPACE: uuid::Uuid = uuid::Uuid::from_u128(0xf86a0c1e_5dbc_419a_b0f3_7a65ec751e7e);` Use exactly this value, give it a doc comment saying it must never change, and never change it.\n\n- `#[derive(Debug, Clone, PartialEq)] pub struct EventRow` with these pub fields, in this order. They are the columns of `events` minus seq and ingested_at:\n  `id: Uuid, ts: String, schema_version: Option<i32>, source: String, kind: String, project: Option<String>, trace_id: Option<String>, span_id: Option<String>, parent_span_id: Option<String>, context_id: Option<String>, emitter_seq: Option<i64>, goal_id: Option<String>, feature_id: Option<String>, task_id: Option<String>, episode_id: Option<String>, run_id: Option<String>, turn_id: Option<String>, role: Option<String>, duration_ms: Option<f64>, origin: Option<String>, payload: Option<serde_json::Value>, extra: Option<serde_json::Value>, spool_file: String, spool_offset: i64, context: Option<ContextRow>`.\n\n- `#[derive(Debug, Clone, PartialEq)] pub struct ContextRow { pub id: String, pub first_seen: String, pub component: Option<String>, pub git_commit: Option<String>, pub host: Option<String>, pub sandbox: Option<String>, pub lane: Option<String>, pub experiment_id: Option<String>, pub variant: Option<String>, pub payload: serde_json::Value }`.\n\n- `#[derive(Debug, Clone, PartialEq)] pub struct QuarantineRow { pub spool_file: String, pub spool_offset: i64, pub error: String, pub raw: Vec<u8> }`.\n\n- `#[derive(Debug, Clone, PartialEq)] pub enum Ingested { Event(EventRow), Quarantine(QuarantineRow) }`.\n\n- `pub fn ingest(file: &str, offset: u64, bytes: &[u8]) -> Ingested`. `file` is the day-file name, `offset` is the byte offset of the line's first byte, and `bytes` is the line, usually without its newline (a trailing newline must still work, and serde_json already accepts trailing whitespace). Rules:\n  * Decode with `std::str::from_utf8`. On failure, return Quarantine with error \"not_utf8\".\n  * Otherwise call `crate::envelope::parse_line(line)`. It is the only validator: do not re-implement any envelope checks. On `Err(e)`, return Quarantine with `error: e.code().to_string()` (e.g. \"bad_kind\", \"not_json\", \"missing_field\").\n  * Every Quarantine row has `spool_file: file.to_string()`, `spool_offset: offset as i64` and `raw`: the first 4096 bytes of `bytes`, or all of them when shorter (e.g. `bytes[..bytes.len().min(4096)].to_vec()`).\n  * On `Ok(event)`, build an EventRow from `event.ts`, `event.source`, `event.kind` and `event.fields` (a serde_json Map that holds every top-level field). parse_line has already validated the types, so read optional fields leniently: a missing or JSON-null field becomes None. Strings use `as_str`. emitter_seq uses `as_i64`, falling back to `as_f64` cast to i64 for whole numbers written as floats such as 3.0. schema_version is the same, narrowed with `i32::try_from(..).ok()`. duration_ms uses `as_f64`. payload is the value when it is present and non-null.\n  * `id`: when the line has an `id`, parse it with `Uuid::parse_str` (upper-case input is fine). Otherwise use `Uuid::new_v5(&PULSE_LEGACY_NAMESPACE, format!(\"{file}:{offset}\").as_bytes())`. The legacy id is then stable when the same line is re-read, and two identical legacy lines at different offsets get different ids.\n  * `extra`: a JSON object holding every top-level field whose name is not an envelope field, with its value kept as-is, nulls included. The envelope fields are ts, source, kind, id, schema_version, project, trace_id, span_id, parent_span_id, context_id, emitter_seq, goal_id, feature_id, task_id, episode_id, run_id, turn_id, role, duration_ms, payload, origin. Keep them in one `const ENVELOPE_FIELDS: &[&str]` in ingest.rs. extra is None when no unknown fields are left.\n  * `spool_file: file.to_string()`, `spool_offset: offset as i64`.\n  * `context`: Some only when kind == \"context.started\" AND context_id is Some. Then `ContextRow { id: context_id, first_seen: ts, component, git_commit, host, sandbox, lane, experiment_id, variant` (each the string value of that key in the payload object, None when it is missing, null or not a string) `, payload` (the payload object, or `serde_json::json!({})` when payload is absent or null, because contexts.payload is NOT NULL) `}`. A context.started line without a context_id is still a normal Event, with context None.\n\n3. Create tests/ingest.rs (integration tests using `pulse::ingest::*`). They must not touch the filesystem except through `include_str!`/`include_bytes!` of files under contract/examples (e.g. `include_str!(\"../contract/examples/valid/optional.ndjson\")`), must not use the network or Postgres, and must not run git. Tests:\n  a. full_line_maps_every_field: one synthetic line with every envelope field set (id, schema_version 1, project, trace_id, span_id, parent_span_id, context_id, emitter_seq, goal_id, feature_id, task_id, episode_id, run_id, turn_id, role, duration_ms 12.5, origin \"agent\", payload object). Assert the whole EventRow with `assert_eq!` against a fully written expected struct, including spool_file, spool_offset, extra None and context None.\n  b. legacy_id_is_uuid5_of_file_offset: one line with no id, ingested at offsets 0 and 100 of the same file. The ids differ, each equals `Uuid::new_v5(&PULSE_LEGACY_NAMESPACE, b\"<file>:<offset>\")`, re-ingesting the same (file, offset, bytes) gives the same id, and the version is 5.\n  c. unknown_fields_land_in_extra: use the edge.ndjson line with \"flavor\" and \"extra\" (and the one with \"unknown_top\"). extra equals the exact JSON object of those unknown keys, and no envelope field appears in it.\n  d. null_optional_fields_are_absent: the edge.ndjson line with `\"emitter_seq\":null,\"origin\":null,\"id\":null` and the one with `\"payload\":null` give None for those fields and extra None. The null id falls back to the uuid5 id.\n  e. context_started_fills_context_row: a synthetic context.started line with context_id \"ctx-1\" and a payload with component, git_commit, host, sandbox, lane, experiment_id, variant plus one extra key such as \"model\". context equals the expected ContextRow, with first_seen == ts and payload equal to the whole payload. Also check that a context.started without a context_id is an Event with context None.\n  f. bad_lines_are_quarantined: each case below becomes Quarantine with the given error code, spool_file and spool_offset echoed: the first line of contract/examples/invalid/not_json.ndjson \u2192 \"not_json\", not_object.ndjson \u2192 \"not_object\", missing_field.ndjson line 2 (source null) \u2192 \"missing_field\", bad_kind.ndjson \u2192 \"bad_kind\", bad_origin.ndjson \u2192 \"bad_origin\", and the bytes `b\"{\\\"ts\\\":\\\"\\xff\\\"}\"` \u2192 \"not_utf8\". raw equals the input bytes for these short lines.\n  g. raw_is_truncated_to_4096: a bad line of 10000 bytes (e.g. 10000 b'x', and also an invalid-UTF-8 one) is quarantined with raw.len() == 4096 equal to the first 4096 input bytes.\n  h. contract_valid_examples_all_ingest: every non-empty line of contract/examples/valid/*.ndjson (include_str! each of basic, edge, optional) ingests as Event, and every non-empty line of the invalid examples (bad_kind, bad_name, bad_origin, bad_timestamp, bad_uuid, missing_field, not_json, not_object, wrong_type) ingests as Quarantine whose error equals the file stem (e.g. \"bad_uuid\").\n\nKeep it short and in the style of src/envelope.rs (module doc comment first: `//! P3: one spool line to one database row.`). The code must pass `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` under toolchain 1.99.0, edition 2024.",
+    "acceptance": "cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked --test ingest",
+    "touches": [
+     "src/ingest.rs",
+     "src/lib.rs",
+     "tests/ingest.rs"
+    ],
+    "needs_upstream": [],
+    "difficulty": "medium"
+   },
+   "original": {
+    "feature_id": "turn-spool-lines-into-event-rows-or-quar:ingest-line",
+    "attempts": 1,
+    "cost_usd": 0.74
+   }
+  },
+  {
+   "id": "pulse:kind-catalog",
+   "repo": "pulse",
+   "base": "558a410eb310488ff6da4dbc29ecc6e39379e0d2",
+   "landed": "22df963882af69e832d262f2dd877af39a341fb5",
+   "holdout": false,
+   "feature": {
+    "title": "contract/catalog.json of every known kind, loaded by src/catalog.rs",
+    "spec": "Pulse is a Rust crate (edition 2024, toolchain 1.99.0). src/envelope.rs already exists and exposes `pulse::envelope::{is_name, is_kind}` (bool checks for the envelope's `name` and `kind` formats) and `parse_line`. Add the kind catalog: contract/catalog.json, src/catalog.rs, `pub mod catalog;` in src/lib.rs (keep everything already there), and tests/catalog.rs.\n\nHARD CONSTRAINTS:\n- Dependencies: only serde and serde_json, already in Cargo.toml and baked into the verifier image. No other crate, not even a dev-dependency: the verifier has no network. If something seems to need one, stop and ask (PLEXUS_BLOCKED). Do not touch Cargo.toml or Cargo.lock.\n- Do not edit contract/envelope.json or contract/observed.json. They are inputs. Do not edit contract/examples/.\n- This repo is public: every example line is synthetic. Use made-up ids, paths like /work/demo, and short invented text. Never copy anything that looks like a real journal line.\n- Always `cargo ... --locked`. Tests write nothing into the checkout, run no git, and use no network. Read files relative to env!(\"CARGO_MANIFEST_DIR\").\n\nINPUT: contract/observed.json is `{\"about\": \"...\", \"kinds\": [{\"source\", \"kind\", \"envelope_fields\": [..], \"payload_fields\": [..]}]}` with 90 (source, kind) pairs from sources arteries, capillaries, heart, plexus.\n\nREQUIREMENTS:\nCLASSES: catalog.json has a top-level `classes` map naming exactly these nine, each with a one-sentence description: identity (ids that tie events together), time (durations and timestamps), measure (numbers to aggregate: tokens, cost, sizes, exit codes, counts, scores), label (judgements: outcome, passed, reward, verdict, failure class, approvals), decision (a choice and the options it was chosen from), content (free text or code an agent saw or produced), provenance (what ran: model, agent, cli, commit, spec hash, store), security (paths, network, rules, seats, access), diagnostic (debugging detail). Every payload field gets exactly one class. Classify by what the field holds in that kind; the same name may get different classes in different kinds when that is true (e.g. `model` is provenance on an episode, decision on a routing event).\n\n1. contract/catalog.json: `{\"about\": \"...\", \"classes\": {name: description}, \"kinds\": [{\"source\", \"kind\", \"description\", \"envelope_fields\": [names], \"payload_fields\": {name: class}}]}`. It contains every (source, kind) pair in contract/observed.json, with the same envelope_fields list and a payload_fields map whose keys are exactly that pair's observed payload field names, plus a one-sentence `description` written from the kind's name and fields (non-empty, ends with a period, describes what the event records; no values, no real data). Also add these kinds named in heart's SPINE.md that observed.json lacks: source `marrow`, kinds `training.started`, `training.progress`, `training.finished` (payload fields: stage provenance, step measure, loss measure; envelope_fields: []). Also add kind `context.started` for each of the sources heart, arteries, capillaries, plexus, marrow (envelope_fields: [\"context_id\"]; payload fields all provenance: component, git_commit, model, profile, config_hashes, image_digest, host, sandbox, lane, variant; plus experiment_id as identity). Sort entries by source, then kind. `about` says the catalog describes kinds and does not gate them, and that it is built from observed.json plus SPINE.md. You may generate the file with a throwaway script but do not commit the script.\n2. src/catalog.rs: `#[derive(Debug, Deserialize)] pub struct Catalog { pub about: String, pub kinds: Vec<KindInfo> }` and `#[derive(Debug, Clone, Deserialize)] pub struct KindInfo { pub source: String, pub kind: String, pub description: String, pub envelope_fields: Vec<String>, pub payload_fields: std::collections::BTreeMap<String, String> }` and `Catalog` also has `pub classes: std::collections::BTreeMap<String, String>``. `pub fn catalog() -> &'static Catalog`, loaded once (std::sync::OnceLock) from `include_str!(\"../contract/catalog.json\")`, panicking with a clear message if it does not parse. `impl Catalog { pub fn lookup(&self, source: &str, kind: &str) -> Option<&KindInfo> }`. Unknown kinds are not errors anywhere: the catalog describes, it does not gate. Do not change parse_line.\n3. tests/catalog.rs (integration test, uses `pulse::catalog` and `pulse::envelope`):\n   - every entry's kind passes `is_kind` and its source passes `is_name`;\n   - no duplicate (source, kind); entries sorted by (source, kind);\n   - every pair in contract/observed.json is present with identical envelope_fields, and payload_fields keys equal to its observed payload field names;\n   - `classes` has exactly the nine names above, and every payload field's class is one of them;\n   - `context.started` is present for heart, arteries, capillaries, plexus and marrow;\n   - the three marrow training kinds are present with payload_fields keys stage, step, loss;\n   - every non-empty line of every contract/examples/valid/*.ndjson parses with parse_line, and its (source, kind) is either found by `catalog().lookup` or its kind starts with `example.`;\n   - descriptions are non-empty;\n   - lookup returns None for an unknown pair such as (\"demo\", \"example.nothing.here\").\n4. Run `cargo fmt` and fix every clippy warning.",
+    "acceptance": "cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked --test catalog",
+    "touches": [
+     "contract/catalog.json",
+     "src/catalog.rs",
+     "src/lib.rs",
+     "tests/catalog.rs"
+    ],
+    "needs_upstream": [],
+    "difficulty": "medium"
+   },
+   "original": {
+    "feature_id": "define-the-event-contract-in-rust:kind-catalog",
+    "attempts": 5,
+    "cost_usd": 3.88
+   }
+  },
+  {
+   "id": "pulse:query-filter",
+   "repo": "pulse",
+   "base": "eb304ffbb6655e5f06ddd3a7be1bbce8fe959c09",
+   "landed": "56e1487796acff803ed9a098d83046048b263f6b",
+   "holdout": false,
+   "feature": {
+    "title": "src/query.rs: EventFilter::from_query and is_hash, with non-DB tests",
+    "spec": "Create the read side of the pulse database: a new module `src/query.rs`, registered in src/lib.rs as `pub mod query;` (keep the alphabetical order of the existing `pub mod` lines). Give it a short `//!` doc comment saying it is the read side of the pulse database (P4 of PLAN.md), behind the socket API's /events, /spans, /artifacts and /health. Later features add the database functions. This one adds only the pure parts.\n\n1. `#[derive(Debug, Clone, PartialEq, Eq)] pub struct EventFilter { pub after: i64, pub limit: i64, pub project: Option<String>, pub goal: Option<String>, pub episode: Option<String>, pub task: Option<String>, pub trace: Option<String>, pub source: Option<String>, pub kind: Option<String>, pub since: Option<String> }`. Implement `Default` by hand so it gives after = 0, limit = 500 and every Option None. `goal`/`episode`/`task`/`trace` filter the events columns goal_id/episode_id/task_id/trace_id. `project`/`source`/`kind` filter the columns of the same name. Say this in a doc comment.\n\n2. `impl EventFilter { pub fn from_query(q: &[(String, String)]) -> Result<EventFilter, String> }`. The input is the already-decoded query pairs of `GET /events?...`. Start from the defaults and apply each pair:\n- `after`: parsed as i64 and must be >= 0, else Err(\"after: must be a non-negative integer\").\n- `limit`: parsed as i64 and must be in 1..=5000, else Err(\"limit: must be between 1 and 5000\"). A non-integer gets the same error.\n- `since`: must satisfy `crate::envelope::is_timestamp` (already exists: `pub fn is_timestamp(s: &str) -> bool`, RFC 3339 `YYYY-MM-DDTHH:MM:SS[.f](Z|\u00b1hh:mm)`), else Err(\"since: must be an RFC 3339 timestamp\").\n- `project`, `goal`, `episode`, `task`, `trace`, `source`, `kind`: any non-empty string. An empty value is Err(\"<name>: must not be empty\").\n- A parameter given twice is Err(\"<name>: given more than once\").\n- Any other name is Err(\"<name>: unknown parameter\").\nEvery error message starts with the parameter's name and a colon. The HTTP layer turns it into a 400 that says which parameter was bad.\n\n3. `pub fn is_hash(s: &str) -> bool`: true iff s is exactly 64 characters, all in [0-9a-f]. Uppercase is false. Callers check this before looking an artifact up.\n\nTests: create `tests/query.rs` with a `//!` header saying the Postgres tests in this file are #[ignore]d and run with `PULSE_TEST_DATABASE_URL='host=/var/run/postgresql dbname=pulse_test' cargo test --test query -- --ignored` (no such tests yet: later features add them). Add plain non-ignored #[test]s, using a small helper that turns `&[(&str, &str)]` into `Vec<(String, String)>`:\n- An empty query gives `EventFilter::default()`, and default has after 0 and limit 500.\n- A full valid query (after=10, limit=5000, every text filter, since=2026-10-13T08:00:00Z) sets every field. limit=1 is accepted.\n- Each bad case returns Err starting with its parameter name: after=-1, after=x, limit=0, limit=5001, limit=abc, since=yesterday, since=2026-10-13 (no time), project= (empty), limit given twice, and an unknown parameter `foo=1` (Err starts with \"foo:\"). Assert the exact messages for at least limit (\"limit: must be between 1 and 5000\") and the unknown parameter (\"foo: unknown parameter\").\n- is_hash: 64 lowercase hex is true. 63 or 65 chars is false. Uppercase hex is false. A 'g' is false. Empty is false.\n\nConstraints: dependencies are fixed (serde, serde_json, postgres, sha2, uuid, zstd). Add none, and don't touch Cargo.toml or Cargo.lock. Don't edit contract/ or sql/. Tests never write into the checkout. The crate is edition 2024 on toolchain 1.99.0, and clippy runs with -D warnings.",
+    "acceptance": "cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked --test query",
+    "touches": [
+     "src/query.rs",
+     "src/lib.rs",
+     "tests/query.rs"
+    ],
+    "needs_upstream": [],
+    "difficulty": "easy"
+   },
+   "original": {
+    "feature_id": "event-span-artifact-and-health-queries:query-filter",
+    "attempts": 1,
+    "cost_usd": 0.43
+   }
+  },
+  {
+   "id": "pulse:spool-reader",
+   "repo": "pulse",
+   "base": "60d1c66100fea37716c5cf6e12d39a5f013f4e24",
+   "landed": "39ea44f9b27ac1b1f9e87900142846fa88c35085",
+   "holdout": false,
+   "feature": {
+    "title": "src/spool.rs: read complete lines from YYYYMMDD.ndjson day files from per-file checkpoints",
+    "spec": "Add a new module `src/spool.rs` and register it with `pub mod spool;` in src/lib.rs, next to the existing `pub mod catalog; pub mod envelope; pub mod paths;`. Use the standard library only. Do not add dependencies; Cargo.toml and Cargo.lock stay as they are. Do not edit contract/ or sql/. Edition 2024, toolchain 1.99.0.\n\nContext: this is the reader for the pulse collector (PLAN.md P3). Other processes append NDJSON events to day files in the journal directory, the one `paths::journal_dir` returns. This module takes a directory as `&Path` and does not call `paths`. The collector tails those files from per-file byte checkpoints.\n\nPublic API:\n```rust\n#[derive(Debug, Clone, PartialEq, Eq)]\npub struct Line {\n    pub file: String,   // day file name only, e.g. \"20261013.ndjson\"\n    pub offset: u64,    // byte offset of the line's first byte in that file\n    pub bytes: Vec<u8>, // the line without its trailing '\\n'\n}\n\npub fn read_new(\n    dir: &Path,\n    checkpoints: &HashMap<String, u64>,\n    max_lines: usize,\n) -> std::io::Result<(Vec<Line>, HashMap<String, u64>)>\n```\n\nBehaviour:\n- Day files are regular files directly in `dir` whose name is exactly 8 ASCII digits followed by `.ndjson` (`YYYYMMDD.ndjson`). Skip every other name, and skip every subdirectory even if its name matches. `incoming/` belongs to arteries and is already folded into the day files. Do not recurse.\n- Process day files in ascending name order (sort the names).\n- For each file, start at `checkpoints.get(name)`, or 0 if the name is absent. If the checkpoint is larger than the file's current length (the file was truncated or replaced), restart that file at 0.\n- Read from the start position only through the last `\\n` in the file. Bytes after the last newline are a partial line that another process is still appending. Never return them and never advance the checkpoint past them; the next call picks them up once completed.\n- Split the complete region on `\\n`. Each non-empty line becomes a `Line` with `offset` = the absolute byte offset of its first byte, and `bytes` holding the content without the newline. Lines are raw bytes: do not decode UTF-8 or strip `\\r`. Empty lines (a bare `\\n`) are not returned, but they still advance the checkpoint.\n- Stop once `max_lines` lines have been returned in total across all files. `max_lines == 0` returns no lines and an empty map.\n- The returned map holds an entry for every file touched: each file that had at least one complete line, empty ones included, consumed in this call. Its value is the byte position just past the `\\n` of the last line consumed. If the limit stops a file partway, the value is just past the last line returned, so the next call resumes exactly there. Files with nothing new are left out of the returned map. One exception: a file that restarted at 0 because of truncation and has no complete line yet should get an entry of 0, so the caller drops its stale checkpoint. The caller merges the returned map into its own; you don't need to echo untouched entries.\n- A missing `dir` is an io error; return it. Errors reading a file are returned with `?`.\n- Simplest acceptable implementation: for each file, open it, seek to the start position, read the rest into a Vec with `read_to_end`, find the last `\\n` with `rposition`, and split. ponytail: whole-tail read; switch to a bounded read if day files get large.\n\nTests: create `tests/spool.rs`, an integration test using `pulse::spool::{read_new, Line}`. Check the crate name in Cargo.toml and use whatever it is. Each test makes its own scratch directory under `std::env::temp_dir()`, with a unique name such as the test name plus process id plus nanos. Never write into the checkout. Remove the directory at the end where practical. No git, no network. All data synthetic (e.g. `{\"n\":1}`). Required tests:\n1. Partial last line: the file holds `a\\nb\\npart` with no trailing newline. The first call returns `a` and `b` only, and the checkpoint is 4. Append `ial\\n`. The next call, with the merged checkpoints, returns exactly one line `partial` at offset 4.\n2. Resume: 5 lines; call with max_lines=2, then again with the returned checkpoints. Lines are returned in order with no duplicates and no gaps, and a final call returns nothing.\n3. `max_lines` across files: `20261012.ndjson` has 2 lines and `20261013.ndjson` has 3. max_lines=3 returns both lines of the first file plus the first line of the second, and the checkpoints for both are correct. The next call returns the remaining 2.\n4. Ignored entries: complete lines in `notes.txt`, `2026101.ndjson`, `20261013.ndjson.tmp`, a subdirectory `incoming/` holding `20261013.ndjson`, and a subdirectory named `20261014.ndjson`. Only lines from the real top-level day file come back, and the returned map holds only that file name.\n5. Exact offsets with multi-byte UTF-8: lines such as `{\"m\":\"h\u00e9llo\"}`, `{\"m\":\"\u65e5\u672c\u8a9e\"}`, `{\"m\":\"\ud83e\udd80\"}`, plus an empty line in between. For every returned Line, check that `offset == 0` or `content[offset-1] == b'\\n'`, that `content[offset..offset+bytes.len()] == bytes[..]`, and that `content[offset+bytes.len()] == b'\\n'`. Check that the empty line is not returned and the checkpoint equals the file length.\n6. Truncation: read a 3-line file to its end, then rewrite it shorter with a single different line. The next call, given the old checkpoint, returns that line at offset 0.\n\nAcceptance: `cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked --test spool`, run from the repository root.",
+    "acceptance": "cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked --test spool",
+    "touches": [
+     "src/spool.rs",
+     "src/lib.rs",
+     "tests/spool.rs"
+    ],
+    "needs_upstream": [],
+    "difficulty": "easy"
+   },
+   "original": {
+    "feature_id": "read-complete-lines-from-the-spool-day-f:spool-reader",
+    "attempts": 2,
+    "cost_usd": 1.0
+   }
+  },
+  {
+   "id": "arteries:web-origin",
+   "repo": "arteries",
+   "base": "685ab6c8ddf01482fadc34317cf1b17c0b33e65c",
+   "landed": "e60ffdedafde0c249640e36d235ab8739ac6a4f7",
+   "holdout": true,
+   "feature": {
+    "title": "Web tool.result events carry origin external",
+    "spec": "In src/arteries/journal.py, journal_append's origin logic gains one case. When kind == 'tool.result' and the payload's 'tool' value matches the hook's web regex, origin is 'external'. The regex is re.compile(r'^(webfetch|websearch|web_fetch|web_search)$', re.I), the same one hooks/arteries-tool.js uses. Every other kind keeps its current origin: turn.observed is agent/operator, assistant.response is agent, everything else is None. A non-web tool.result has no origin. Add tests to tests/test_journal_trace.py. Point EVENT_JOURNAL_DIR at tmp_path. journal_append('arteries','tool.result', tool='WebFetch') writes origin 'external', and so does tool='web_search'. tool='Bash' writes no origin key. Also add an end-to-end test that runs arteries.observe_tool.main with stdin set to {\"tool\":\"WebSearch\",\"target\":\"search\"}. Use monkeypatch on sys.stdin, set ARTERIES_RUN_LOG/db so that runlog falls back without Postgres (the db write fails and is swallowed), and point EVENT_JOURNAL_DIR at tmp_path. Then assert the journaled tool.result line has origin 'external'.",
+    "acceptance": "python3 -m pytest -q tests/test_journal_trace.py -k origin",
+    "touches": [
+     "src/arteries/journal.py",
+     "tests/test_journal_trace.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "easy"
+   },
+   "original": {
+    "feature_id": "trace-hook-events-by-session-and-keep-we:web-origin",
+    "attempts": 1,
+    "cost_usd": 1.05
+   }
+  },
+  {
+   "id": "capillaries:corpus-marker",
+   "repo": "capillaries",
+   "base": "df2ab33383372f621e4a2fa4ca05065ae5701582",
+   "landed": "b66c47cc9176fae328ff976726f68cd21feffd33",
+   "holdout": true,
+   "feature": {
+    "title": "Add a corpus marker and skip corpus tests when prompts is empty",
+    "spec": "Some db tests measure retrieval quality against the real prompt corpus, so on an empty capillaries_test they can never pass. Gate them on a new marker.\n\n1. pyproject.toml: in [tool.pytest.ini_options] markers, next to the db entry, register `\"corpus: needs the real prompt corpus loaded into capillaries_test (skipped when prompts is empty)\"`.\n\n2. tests/conftest.py:\n- Add `_corpus_loaded() -> bool`. It connects with DB_CONFIG (connect_timeout=2) and returns True only if `SELECT EXISTS (SELECT 1 FROM prompts)` is true. Any exception, including a missing prompts table, returns False.\n- Extend pytest_collection_modifyitems. The existing db logic stays the same. When it returns early because DB_NAME is live or Postgres is unreachable, the db items are already skipped and nothing else happens. When the DB is reachable, collect the items with \"corpus\" in item.keywords. If there are any and `_corpus_loaded()` is False, add a skip marker to each one with this reason: `prompts table in capillaries_test is empty; load the corpus first: pg_dump capillaries | psql capillaries_test`. Query the DB once per session, not once per item. Add a line to the module docstring under the one-time setup section about loading the corpus for corpus tests.\n\n3. Mark the corpus-dependent tests with `pytest.mark.corpus`, alongside their existing db marker. Do not change any assertion, threshold or test body:\n- tests/test_search.py: classes TestGoldenSet and TestRankingQuality (decorate the classes).\n- tests/test_gate.py: the TestLiveGate tests that check corpus drift or frozen similarities against real prompts (at minimum test_frozen_sims_still_hold; mark the class if all of its tests read real-corpus similarities).\n- tests/test_skill_parity.py and tests/test_active_only.py: module-level, `pytestmark = [pytest.mark.db, pytest.mark.corpus]`.\n\n4. Add tests/test_corpus_marker.py, a non-db test that must pass without Postgres. Load tests/conftest.py as a module via importlib.util.spec_from_file_location under a distinct name such as `_conftest_under_test`. Monkeypatch its `_db_reachable` to return True and its `_corpus_loaded` to return False/True. Build fake items: simple objects with a `keywords` dict/set and an `add_marker` that records markers. Call `pytest_collection_modifyitems(None, items)` and assert:\n(a) with an empty corpus, a db+corpus item gets a skip whose reason contains 'pg_dump capillaries | psql capillaries_test', and a db-only item gets none;\n(b) with the corpus loaded, nothing is skipped;\n(c) when `_db_reachable` is False, the corpus item is skipped exactly once with the Postgres-unreachable reason, and `_corpus_loaded` is never called.\nUse monkeypatch.setenv/delenv for DB_NAME so the live-DB branch isn't hit. Also assert that each of the four test files contains `pytest.mark.corpus`, reading them relative to the test file.\n\nCI stays `-m \"not db\"`, unchanged.",
+    "acceptance": "python3 -m pytest -q tests/test_corpus_marker.py && python3 -m pytest --markers | grep -q '@pytest.mark.corpus' && for f in tests/test_search.py tests/test_gate.py tests/test_skill_parity.py tests/test_active_only.py; do grep -q 'pytest.mark.corpus' \"$f\" || exit 1; done && python3 -m pytest -q --strict-markers --co -m corpus tests/test_search.py tests/test_gate.py tests/test_skill_parity.py tests/test_active_only.py",
+    "touches": [
+     "pyproject.toml",
+     "tests/conftest.py",
+     "tests/test_search.py",
+     "tests/test_gate.py",
+     "tests/test_skill_parity.py",
+     "tests/test_active_only.py",
+     "tests/test_corpus_marker.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "easy"
+   },
+   "original": {
+    "feature_id": "create-prompt-chunks-on-a-fresh-install-:corpus-marker",
+    "attempts": 1,
+    "cost_usd": 0.63
+   }
+  },
+  {
+   "id": "heart:pulse-compare-cmd",
+   "repo": "heart",
+   "base": "1b02727c8123f90f0be3bc52a442f5ea2f735de2",
+   "landed": "0b166825f6825bdec50254ac0b982ed74bf9db99",
+   "holdout": true,
+   "feature": {
+    "title": "`heart pulse compare --day YYYY-MM-DD` diffs the socket path against the file scan",
+    "spec": "Add `compare(day: str, show: int = 5) -> tuple[list[str], int]` to src/heart/pulse.py. Validate day with datetime.date.fromisoformat; a bad value returns ([\"bad --day: <value>\"], 2). Keep only the events whose `ts` starts with that day: file events from file_events(), socket events from socket_events(). If socket_events() returns None, return ([\"pulse socket unavailable; nothing to compare\", \"file: <n> events\"], 2). Otherwise compare the two lists as multisets of canonical JSON (json.dumps(e, sort_keys=True)) using collections.Counter. Output lines:\n`day <day>: socket <a> events, file <b> events`\nthen either `match` (exit 0), or `mismatch: <x> only in socket, <y> only in file` followed by up to `show` lines `  socket only: <render(e)>` and up to `show` lines `  file only: <render(e)>` (exit 1).\n\nIn src/heart/cli.py, add \"compare\" to the `pulse` subcommand choices, add `--day` (default None) to that parser, and handle it in cmd_pulse: missing --day prints `usage: heart pulse compare --day YYYY-MM-DD` to stderr and returns 2. Otherwise print the lines and return the code. Update the parser help string to list compare.\n\nTests go in a new tests/test_pulse_compare.py. Reuse the short /tmp VASCULAR_HOME and fake Unix-socket collector approach from tests/test_pulse_socket.py (copy the small helper, no shared fixture module). Cases: (a) socket and journal hold the same events for 2026-01-01, plus an extra file event on 2026-01-02 that must be ignored: exit 0 and a `match` line. (b) the socket is missing one event the journal has: exit 1, a `mismatch: 0 only in socket, 1 only in file` line, and a `file only:` line. (c) no socket: exit 2. Call through heart.cli.main([...]) where the existing tests do, otherwise through pulse.compare, and capture output with capsys.\n\nexpect:\n$ VASCULAR_HOME=/nonexistent-vascular EVENT_JOURNAL_DIR=/nonexistent-journal PYTHONPATH=src python3 -m heart.cli pulse compare --day 2026-01-01\npulse socket unavailable; nothing to compare\nfile: 0 events",
+    "acceptance": "python3 -m pytest -q tests/test_pulse_compare.py && VASCULAR_HOME=/nonexistent-vascular EVENT_JOURNAL_DIR=/nonexistent-journal PYTHONPATH=src python3 -m heart.cli pulse compare --day 2026-01-01 | grep -q 'pulse socket unavailable'",
+    "touches": [
+     "src/heart/pulse.py",
+     "src/heart/cli.py",
+     "tests/test_pulse_compare.py"
+    ],
+    "needs_upstream": [],
+    "difficulty": "easy"
+   },
+   "original": {
+    "feature_id": "read-events-from-the-pulse-socket-file-s:pulse-compare-cmd",
+    "attempts": 1,
+    "cost_usd": 0.58
+   }
+  },
+  {
+   "id": "pulse:events-desc-query",
+   "repo": "pulse",
+   "base": "ab11ca30c55f05d2c797d39a1076093212bfdfac",
+   "landed": "45b3646df85254115469fe6c9c96037f7e6949c0",
+   "holdout": true,
+   "feature": {
+    "title": "order=asc|desc and before=<seq> on GET /events (filter, SQL, tests)",
+    "spec": "In src/query.rs, add `pub enum Order { Asc, Desc }` (derive Debug, Clone, Copy, PartialEq, Eq, Default with Asc as the default). Give EventFilter two new fields: `pub order: Order` (default Asc) and `pub before: Option<i64>` (default None). Update the EventFilter doc comment to cover them.\n\nEventFilter::from_query:\n- `order`: accepts exactly `asc` or `desc`. Anything else, including empty, is Err(\"order: must be asc or desc\").\n- `before`: accepts a non-negative i64. Anything else is Err(\"before: must be a non-negative integer\").\n- Both go through the existing duplicate check, so giving one twice is still `<name>: given more than once`. Every error still starts with the parameter name and a colon. serve.rs already turns these into 400s, so it needs no change.\n\nquery::events:\n- Keep `seq > $1` (after) in both orders. When `before` is Some, add `AND seq < $n` in both orders.\n- Asc keeps `ORDER BY seq` and its `next` rule: the last row's seq, or f.after when the page is empty. Asc output must not change.\n- Desc uses `ORDER BY seq DESC`. `next` is the last (smallest) seq on the page; when the page is empty it is f.before, or 0 if before is None.\n- project, goal, episode, task, trace, source, kind, since and limit apply the same way in both orders.\n- Update the doc comment on events.\n\nTests in tests/query.rs. Update the existing full struct literal in full_query_sets_every_field so it sets order and before, and add those two to that query. New tests, with these exact names:\n- `order_and_before_parse` (not ignored): an empty query gives Order::Asc and before None; order=asc gives Asc; order=desc gives Desc; before=0 and before=42 parse.\n- `bad_order_and_before_name_themselves` (not ignored): order=DESC, order=up, order=(empty), before=-1, before=x and before=1.5 all return Err. Each error starts with `order:` or `before:` as appropriate. order given twice gives `order: given more than once`.\n- `desc_returns_newest_first` (#[ignore = \"needs Postgres: set PULSE_TEST_DATABASE_URL\"]): insert rows; desc with no cursor returns them in strictly decreasing seq order, and next equals the smallest seq on the page.\n- `desc_pages_with_before_walk_every_row` (same ignore): insert at least 7 rows, several sharing one ts. With limit=2 and order=desc, follow before=<next> until a page comes back empty. The concatenated ids equal every row newest-first, with no gaps or repeats. The empty final page has next == the before it was given. With no before and an empty table, next is 0.\n- `desc_combines_with_kind_and_source` (same ignore): desc filtered by kind, and by source, returns only matching rows, newest first. The after+before window works in desc.\n- `asc_unchanged_with_before` (same ignore): asc with before=<n> returns only seq < n in ascending order. Asc without before returns the same pages as before this change.\n\nIn tests/serve.rs, add the non-ignored test `events_route_rejects_bad_order_and_before`. Call the /events route on the down() fake with order=sideways, then with before=-3. Each must return 400 with a body starting `order:` or `before:` respectively.\n\nUse only synthetic test data. Add no dependencies. Run cargo fmt; clippy --all-targets -D warnings must be clean.",
+    "acceptance": "cargo test --locked --test query -- order_and_before_parse bad_order_and_before_name_themselves && cargo test --locked --test serve events_route_rejects_bad_order_and_before && cargo test --locked --test query -- --ignored --list 2>/dev/null | grep -q '^desc_pages_with_before_walk_every_row: test' && cargo test --locked --test query -- --ignored --list 2>/dev/null | grep -q '^desc_returns_newest_first: test' && cargo test --locked --test query -- --ignored --list 2>/dev/null | grep -q '^desc_combines_with_kind_and_source: test' && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings",
+    "touches": [
+     "src/query.rs",
+     "tests/query.rs",
+     "tests/serve.rs"
+    ],
+    "needs_upstream": [],
+    "difficulty": "medium"
+   },
+   "original": {
+    "feature_id": "newest-first-paging-on-events-order-desc:events-desc-query",
+    "attempts": 1,
+    "cost_usd": 0.72
+   }
+  }
+ ]
+}

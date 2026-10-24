@@ -39,7 +39,7 @@ attempts_per_feature = 3
 episodes_per_goal = 25
 
 [agent]
-model = "claude"  # a model nickname from ~/.config/heart/models.json, a raw heart
+model = "claude"  # a model nickname from ~/.vascular/config/heart/models.json, a raw heart
                   # agent string (claude|codex|api[:profile]|shell), or "auto" to
                   # route each turn from the difficulty its task declares
 timeout = 300

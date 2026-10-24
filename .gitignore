@@ -25,3 +25,6 @@ frontend/*.tsbuildinfo
 .env
 .env.*
 !.env.example
+
+# plexus replay results: local eval records
+evals/results/
