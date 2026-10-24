@@ -28,3 +28,8 @@ frontend/*.tsbuildinfo
 
 # plexus replay results: local eval records
 evals/results/
+
+# Private, never committed anywhere: agent reasoning traces and compaction
+# transcripts (DIRECTION §14).
+*reasoning_trace*
+.compaction-corpus/
