@@ -30,6 +30,13 @@ PLEXUS = [sys.executable, "-c", "import sys; from plexus.cli import main; sys.ex
 # that read a tmp journal and expect it to just work; they are run as they
 # were written, with the journal files read on purpose.
 OLD_TESTS_ENV = "HEART_PULSE=file"
+# Said in the spec too, so agent and reviewer take it as the setup rather than
+# a defect to fix: with only the env set, escalation-cost's agent masked the
+# base's PulseUnavailable with collection order and the review rejected it,
+# then asked to edit tests outside its paths (2026-10-28).
+OLD_TESTS_NOTE = (f"Replay note: this repo is at an old commit whose tests expect "
+                  f"{OLD_TESTS_ENV}. It is set in your shell and in every check that "
+                  f"judges this work; failures without it are not part of the task.\n\n")
 
 
 def _scratch(prefix: str) -> Path:
@@ -134,6 +141,7 @@ def sample(task: dict, keep: bool = False) -> dict:
         state.mkdir(parents=True, exist_ok=True)
         feature = {"plan_id": f"replay-{task['id'].replace(':', '-')}",
                    "id": task["id"].split(":")[-1], **task["feature"],
+                   "spec": OLD_TESTS_NOTE + task["feature"]["spec"],
                    "acceptance": f"export {OLD_TESTS_ENV}; {task['feature']['acceptance']}"}
         (state / "plan.jsonl").write_text(json.dumps(feature) + "\n")
         out = []
