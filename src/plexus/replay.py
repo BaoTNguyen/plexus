@@ -30,6 +30,13 @@ PLEXUS = [sys.executable, "-c", "import sys; from plexus.cli import main; sys.ex
 # that read a tmp journal and expect it to just work; they are run as they
 # were written, with the journal files read on purpose.
 OLD_TESTS_ENV = "HEART_PULSE=file"
+# Said in the spec too, so agent and reviewer take it as the setup rather than
+# a defect to fix: with only the env set, escalation-cost's agent masked the
+# base's PulseUnavailable with collection order and the review rejected it,
+# then asked to edit tests outside its paths (2026-10-28).
+OLD_TESTS_NOTE = (f"Replay note: this repo is at an old commit whose tests expect "
+                  f"{OLD_TESTS_ENV}. It is set in your shell and in every check that "
+                  f"judges this work; failures without it are not part of the task.\n\n")
 
 
 def _scratch(prefix: str) -> Path:
@@ -112,6 +119,17 @@ def goal_toml(toml: str, task_id: str) -> str:
     return re.sub(r'(?m)^dependents = .*$', "dependents = []", toml)
 
 
+def run_env(environ: dict) -> dict:
+    """The env `plexus run` gets in a replay: the old-tests var set, and named
+    for passthrough so the agent's sandbox shell has it too. Without it the
+    agent sees the base's suite fail on untouched code and stops to ask
+    (escalation-cost, 2026-10-28). It only picks how journals are read."""
+    name, value = OLD_TESTS_ENV.split("=")
+    named = [n for n in environ.get("HEART_SANDBOX_ENV", "").split(",") if n.strip()]
+    return {**environ, name: value,
+            "HEART_SANDBOX_ENV": ",".join(dict.fromkeys([*named, name]))}
+
+
 def sample(task: dict, keep: bool = False) -> dict:
     """One replay of one task through plexus run; the clone's ledger says how it went."""
     tmp = _scratch("sample-")
@@ -123,12 +141,13 @@ def sample(task: dict, keep: bool = False) -> dict:
         state.mkdir(parents=True, exist_ok=True)
         feature = {"plan_id": f"replay-{task['id'].replace(':', '-')}",
                    "id": task["id"].split(":")[-1], **task["feature"],
+                   "spec": OLD_TESTS_NOTE + task["feature"]["spec"],
                    "acceptance": f"export {OLD_TESTS_ENV}; {task['feature']['acceptance']}"}
         (state / "plan.jsonl").write_text(json.dumps(feature) + "\n")
         out = []
         for argv in (["approve"], ["run"]):
             got = subprocess.run([*PLEXUS, *argv, "--root", str(work)], cwd=work,
-                                 capture_output=True, text=True)
+                                 env=run_env(dict(os.environ)), capture_output=True, text=True)
             out.append(got.stdout[-2000:] + got.stderr[-2000:])
             if argv[0] == "approve" and got.returncode:
                 return {"id": task["id"], "outcome": "not-approved", "detail": out[-1]}

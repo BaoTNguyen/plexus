@@ -76,3 +76,11 @@ def test_a_replay_goal_drops_dependents_and_keeps_its_own_suite():
     assert "dependents = []" in got and "plexus" not in got
     import tomllib
     assert tomllib.loads(got)["goal"]["dependents"] == []
+
+
+def test_the_agent_sandbox_gets_the_old_tests_env_too():
+    from plexus.replay import run_env
+    env = run_env({"HEART_SANDBOX_ENV": "ANTHROPIC_API_KEY,HEART_PULSE", "X": "1"})
+    assert env["HEART_PULSE"] == "file" and env["X"] == "1"
+    assert env["HEART_SANDBOX_ENV"] == "ANTHROPIC_API_KEY,HEART_PULSE"
+    assert run_env({})["HEART_SANDBOX_ENV"] == "HEART_PULSE"
