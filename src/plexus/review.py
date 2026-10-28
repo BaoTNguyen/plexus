@@ -526,30 +526,42 @@ def cross_repo_callers(repo: str | Path, base: str, diff: str) -> list[str]:
         patches = _diff_file_patches(diff)
         touched = set(diff_paths(repo_path, diff, strict=False)) & set(patches)
         prefix = f"{pkg_base}/" if pkg_base else ""
-        changed: set[str] = set()
-        for path in touched:
+
+        def module(path: str) -> str | None:
             if not path.endswith(".py") or not path.startswith(prefix):
-                continue
+                return None
             rel = path[len(prefix):]
             if rel.split("/", 1)[0] not in pkgs:
+                return None
+            # importers write `pkg.name`, never `pkg.__init__.name`
+            return rel[:-len(".py")].replace("/", ".").removesuffix(".__init__")
+
+        changed: set[str] = set()
+        for path in touched:
+            if not (dotted := module(path)):
                 continue
             try:
                 names = _changed_public_names(repo_path, base, path, patches[path])
             except Exception:
                 continue
-            dotted = rel[:-len(".py")].replace("/", ".")
             changed |= {f"{dotted}.{n}" for n in names}
+        # a moved module is, to its importers, every public name of the old
+        # one deleted: the renamed patch has no before-content to compare
+        for old in re.findall(r"(?m)^rename from (.+)$", diff):
+            old = _unquote(old)
+            if (dotted := module(old)):
+                changed |= {f"{dotted}.{n}" for n in _public_defs(_show(repo_path, f"{base}:{old}"))}
         if not changed:
             return []
         refs: set[str] = set()
         for sib in repo_path.parent.iterdir():
             if not sib.is_dir() or sib == repo_path or not (sib / ".git").exists():
                 continue
-            r = subprocess.run(["git", "-C", str(sib), "ls-files", "*.py"],
+            r = subprocess.run(["git", "-C", str(sib), "ls-files", "-z", "*.py"],
                                capture_output=True, text=True)
             if r.returncode != 0:
                 continue
-            for f in r.stdout.split():
+            for f in filter(None, r.stdout.split("\0")):
                 try:
                     text = (sib / f).read_text()
                 except OSError:
