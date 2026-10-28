@@ -99,18 +99,26 @@ def check(task: dict) -> str | None:
     return None
 
 
+def goal_toml(toml: str, task_id: str) -> str:
+    """Today's goal file, fitted to a replay. Its own goal id, so replay events
+    stay out of the real goal's feed; the old-tests env on the suite; and no
+    dependents. Those are today's sibling checkouts, not the ones the feature
+    landed beside: plexus's tests import heart.observe, so every heart task
+    failed its regression on a heart from before it (2026-10-28). The repo's
+    own suite still runs."""
+    goal = "replay-" + re.sub(r"[^a-z0-9-]+", "-", task_id.lower())
+    toml = re.sub(r'(?m)^id = ".*"', f'id = "{goal}"', toml, count=1)
+    toml = re.sub(r'(?m)^suite = "', f'suite = "{OLD_TESTS_ENV} ', toml, count=1)
+    return re.sub(r'(?m)^dependents = .*$', "dependents = []", toml)
+
+
 def sample(task: dict, keep: bool = False) -> dict:
     """One replay of one task through plexus run; the clone's ledger says how it went."""
     tmp = _scratch("sample-")
     try:
         work = _clone(task, tmp, task["base"])
-        # today's goal file, under its own goal id: replay events must not
-        # land in the real goal's feed
-        toml = (_repo(task) / "plexus.toml").read_text()
-        goal = "replay-" + re.sub(r"[^a-z0-9-]+", "-", task["id"].lower())
-        toml = re.sub(r'(?m)^id = ".*"', f'id = "{goal}"', toml, count=1)
-        toml = re.sub(r'(?m)^suite = "', f'suite = "{OLD_TESTS_ENV} ', toml, count=1)
-        (work / "plexus.toml").write_text(toml)
+        (work / "plexus.toml").write_text(
+            goal_toml((_repo(task) / "plexus.toml").read_text(), task["id"]))
         state = work / ".vascular" / "plexus"
         state.mkdir(parents=True, exist_ok=True)
         feature = {"plan_id": f"replay-{task['id'].replace(':', '-')}",
