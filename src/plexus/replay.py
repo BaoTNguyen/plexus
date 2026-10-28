@@ -112,6 +112,17 @@ def goal_toml(toml: str, task_id: str) -> str:
     return re.sub(r'(?m)^dependents = .*$', "dependents = []", toml)
 
 
+def run_env(environ: dict) -> dict:
+    """The env `plexus run` gets in a replay: the old-tests var set, and named
+    for passthrough so the agent's sandbox shell has it too. Without it the
+    agent sees the base's suite fail on untouched code and stops to ask
+    (escalation-cost, 2026-10-28). It only picks how journals are read."""
+    name, value = OLD_TESTS_ENV.split("=")
+    named = [n for n in environ.get("HEART_SANDBOX_ENV", "").split(",") if n.strip()]
+    return {**environ, name: value,
+            "HEART_SANDBOX_ENV": ",".join(dict.fromkeys([*named, name]))}
+
+
 def sample(task: dict, keep: bool = False) -> dict:
     """One replay of one task through plexus run; the clone's ledger says how it went."""
     tmp = _scratch("sample-")
@@ -128,7 +139,7 @@ def sample(task: dict, keep: bool = False) -> dict:
         out = []
         for argv in (["approve"], ["run"]):
             got = subprocess.run([*PLEXUS, *argv, "--root", str(work)], cwd=work,
-                                 capture_output=True, text=True)
+                                 env=run_env(dict(os.environ)), capture_output=True, text=True)
             out.append(got.stdout[-2000:] + got.stderr[-2000:])
             if argv[0] == "approve" and got.returncode:
                 return {"id": task["id"], "outcome": "not-approved", "detail": out[-1]}
