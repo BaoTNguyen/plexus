@@ -83,6 +83,14 @@ _BLOCKS_PER_FEATURE = 2
 _LOCKS: dict[str, object] = {}
 
 
+
+#: the escalation's reason, by the last failed attempt's failure_class
+EXHAUSTED = {
+    "verify_failed": "passed acceptance but failed the regression suite",
+    "review_rejected": "was rejected by the review",
+    "expect_mismatch": "passed acceptance but did not match the expect block",
+}
+
 def _lock_goal(root: Path) -> None:
     """One `plexus run` per goal repo. Two concurrent runs would interleave
     commits on the same branch and race `_land` — the second one must say so
@@ -956,6 +964,7 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
         retry_context: dict = {"resume_answer": resume_answer} if resume_answer else {}
         landed = False
         last_episode_ids: list[str] = []
+        fclass = "acceptance_failed"  # what the last failed attempt failed on
         attempt = next_attempt
         budget = spec.attempts_per_feature - budget_used
         span: dict[str, str] = {}
@@ -1249,8 +1258,11 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
         if not landed:
             ledger.record("escalation.raised", goal_id=spec.goal_id, feature_id=fid,
                           root=root, reason_class="attempts_exhausted",
-                          reason=f"{spec.attempts_per_feature} attempts failed "
-                                 f"acceptance: {feat['acceptance']}",
+                          # name what the last attempt failed on: "failed acceptance"
+                          # for a green criterion and a red suite sent the reader
+                          # to the wrong place (replay, 2026-10-28)
+                          reason=f"{spec.attempts_per_feature} attempts failed; the last "
+                                 + EXHAUSTED.get(fclass, f"failed acceptance: {feat['acceptance']}"),
                           episode_ids=last_episode_ids, **span)
             return 1
 

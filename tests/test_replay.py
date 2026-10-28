@@ -65,3 +65,14 @@ def test_a_clone_has_no_remote_to_deliver_to(tmp_path, monkeypatch):
     work = replay._clone({"repo": "src"}, tmp_path / "out", head)
     assert subprocess.run(["git", "-C", str(work), "remote"], capture_output=True,
                           text=True).stdout.strip() == ""
+
+
+def test_a_replay_goal_drops_dependents_and_keeps_its_own_suite():
+    toml = ('[goal]\nid = "heart"\nsuite = "pytest -q"\n'
+            'dependents = ["plexus", "marrow"]   # F85\n')
+    got = replay.goal_toml(toml, "heart:route-state-paths")
+    assert 'id = "replay-heart-route-state-paths"' in got
+    assert f'suite = "{replay.OLD_TESTS_ENV} pytest -q"' in got
+    assert "dependents = []" in got and "plexus" not in got
+    import tomllib
+    assert tomllib.loads(got)["goal"]["dependents"] == []
