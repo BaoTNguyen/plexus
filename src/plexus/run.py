@@ -44,7 +44,8 @@ from . import vascular_state
 from .plan import matches as _matches
 from .plan import execution_order, load_plan, parse_expect
 from .registry import load_registry, seed_upstream
-from .review import classify, cross_repo_callers, diff_paths, exec_surface, report, suspicious, trust_boundary
+from .review import (classify, credentials, cross_repo_callers, diff_paths, exec_surface,
+                     report, suspicious, trust_boundary)
 
 # heart episode outcomes that are mechanical failures — no valid applied diff to
 # judge a criterion against, so acceptance is skipped and it's a coding failure.
@@ -1125,10 +1126,13 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
                 # the plan's class is a prediction; what the diff actually
                 # touches can raise it -- a hook or a manifest runs on your
                 # machine whatever the plan called the feature
-                runs_here = exec_surface(diff_paths(repo, diff))
+                touched = diff_paths(repo, diff)
+                runs_here = exec_surface(touched)
+                creds = credentials(touched, diff)
                 flags = suspicious(repo, base, diff)
                 if cls not in spec.review_hold:
-                    cls = "exec" if runs_here else "suspect" if flags else cls
+                    cls = ("exec" if runs_here else "credentials" if creds
+                           else "suspect" if flags else cls)
                 # a name this diff changed that a sibling checkout still refers
                 # to is a break plexus can't see from one repo alone
                 callers = cross_repo_callers(repo, base, diff)
@@ -1146,6 +1150,8 @@ def _walk_plan(spec, root: Path, runs_dir, candidates: int, task_id: str,
                                f"to land, or amend the plan"
                                + (f" (runs on your machine: {', '.join(runs_here[:5])})"
                                   if runs_here else "")
+                               + (f" (credentials: {'; '.join(creds[:5])})"
+                                  if creds else "")
                                + (f" (new in this diff: {'; '.join(flags[:5])})"
                                   if flags else "")
                                + (f" (called from: {', '.join(callers[:10])})"

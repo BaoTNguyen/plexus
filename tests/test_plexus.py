@@ -578,7 +578,7 @@ assert _resolved_hold(ledger.read(hr), "g", "f1") == ""     # a rebuild is unrea
 # the classes that can break something no test covers, or run on your machine
 # once landed, hold by default — a spec that says nothing must not mean "land
 # the ledger schema unread", nor "land a new SessionStart hook unread"
-assert load_spec(rr).review_hold == ("spine", "boundary", "exec", "suspect")
+assert load_spec(rr).review_hold == ("spine", "boundary", "exec", "credentials", "suspect")
 assert load_spec(rr).pr_base == "main"
 # and an explicit empty list still opts out
 (rr / "plexus.toml").write_text((rr / "plexus.toml").read_text()

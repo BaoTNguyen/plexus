@@ -57,7 +57,19 @@ EXEC_NAMES = ("conftest.py", "setup.py", "setup.cfg", "pyproject.toml",
               ".npmrc", ".pre-commit-config.yaml", ".gitlab-ci.yml", ".envrc",
               "Makefile", "*.pth", "sitecustomize.py", "usercustomize.py")
 
-CLASSES = ("spine", "boundary", "exec", "suspect", "leaf", "mechanical")
+# Code that holds a secret or decides whom to trust. On 2026-09-28 eight TLS and
+# seat-injection features landed as leaf after one same-vendor review, and
+# suspicious() said nothing: the modules already used subprocess and the
+# network, so nothing was *new*. Credential work is judged by what it is, not
+# by what it newly adds -- the path, or a credential word on a changed line.
+CREDENTIAL_PATHS = ("egress-proxy.py", "heart/sandbox.py", "plexus/registry.py",
+                    "plexus/tls.py", "plexus/sandbox.py")
+_CREDENTIAL = re.compile(
+    r"seat_secrets|\bsentinel\b|auth\.json|access_token|refresh_token|PRIVATE KEY|"
+    r"private_key|\.key[\"']|ssl\.(SSLContext|create_default_context)|load_cert_chain|"
+    r"load_verify_locations|\b(certfile|keyfile)\b")
+
+CLASSES = ("spine", "boundary", "exec", "credentials", "suspect", "leaf", "mechanical")
 
 
 # Capabilities a backdoor needs and ordinary feature work rarely adds: a way
@@ -161,6 +173,26 @@ def exec_surface(paths: list[str]) -> list[str]:
     return [p for p in paths
             if any(_matches(p, g) for g in EXEC_DIRS)
             or any(fnmatch.fnmatch(p.rsplit("/", 1)[-1], n) for n in EXEC_NAMES)]
+
+
+def credentials(paths: list[str], diff: str) -> list[str]:
+    """What in a diff handles credentials: a path from CREDENTIAL_PATHS or under
+    a `secrets/` directory, or a code line added or removed that names one.
+    Removed lines count too -- dropping a cert check is credential work."""
+    found = [p for p in paths
+             if any(p == c or p.endswith("/" + c) for c in CREDENTIAL_PATHS)
+             or "secrets" in p.split("/")[:-1]]
+    current = None
+    for line in diff.splitlines():
+        if line.startswith(("+++ ", "--- ")):
+            target = line[4:].strip()
+            if target != "/dev/null":
+                current = target[2:] if target[1:2] == "/" and target.endswith(_CODE) else None
+            continue
+        if current and line.startswith(("+", "-")) and _CREDENTIAL.search(line[1:]):
+            found.append(f"{current}: {line[1:].strip()[:80]}")
+            current = None  # one line per file is enough to name it
+    return list(dict.fromkeys(found))
 
 
 def classify(feat: dict) -> str:
@@ -494,30 +526,42 @@ def cross_repo_callers(repo: str | Path, base: str, diff: str) -> list[str]:
         patches = _diff_file_patches(diff)
         touched = set(diff_paths(repo_path, diff, strict=False)) & set(patches)
         prefix = f"{pkg_base}/" if pkg_base else ""
-        changed: set[str] = set()
-        for path in touched:
+
+        def module(path: str) -> str | None:
             if not path.endswith(".py") or not path.startswith(prefix):
-                continue
+                return None
             rel = path[len(prefix):]
             if rel.split("/", 1)[0] not in pkgs:
+                return None
+            # importers write `pkg.name`, never `pkg.__init__.name`
+            return rel[:-len(".py")].replace("/", ".").removesuffix(".__init__")
+
+        changed: set[str] = set()
+        for path in touched:
+            if not (dotted := module(path)):
                 continue
             try:
                 names = _changed_public_names(repo_path, base, path, patches[path])
             except Exception:
                 continue
-            dotted = rel[:-len(".py")].replace("/", ".")
             changed |= {f"{dotted}.{n}" for n in names}
+        # a moved module is, to its importers, every public name of the old
+        # one deleted: the renamed patch has no before-content to compare
+        for old in re.findall(r"(?m)^rename from (.+)$", diff):
+            old = _unquote(old)
+            if (dotted := module(old)):
+                changed |= {f"{dotted}.{n}" for n in _public_defs(_show(repo_path, f"{base}:{old}"))}
         if not changed:
             return []
         refs: set[str] = set()
         for sib in repo_path.parent.iterdir():
             if not sib.is_dir() or sib == repo_path or not (sib / ".git").exists():
                 continue
-            r = subprocess.run(["git", "-C", str(sib), "ls-files", "*.py"],
+            r = subprocess.run(["git", "-C", str(sib), "ls-files", "-z", "*.py"],
                                capture_output=True, text=True)
             if r.returncode != 0:
                 continue
-            for f in r.stdout.split():
+            for f in filter(None, r.stdout.split("\0")):
                 try:
                     text = (sib / f).read_text()
                 except OSError:
