@@ -233,7 +233,7 @@ assert classify_phase("expect_mismatch", "pass", False) == "intent"
 # --- review_hold is on out of the box --------------------------------------
 # The whole surface is decoration if the riskiest commits still auto-land, so
 # the default is the policy, not the empty tuple.
-assert set(GoalSpec.review_hold) == {"spine", "boundary", "exec", "suspect"}
+assert set(GoalSpec.review_hold) == {"spine", "boundary", "exec", "credentials", "suspect"}
 
 # --- opening the PR never costs the run ------------------------------------
 # Every way this can be unavailable has to return a string, not raise: the goal

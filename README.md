@@ -302,6 +302,7 @@ From those two, before any episode runs, every feature gets a class:
 | --- | --- | --- |
 | `spine` | `touches` can reach `ledger.py`, `spec.py`, `export.py`, `events.py` or `LEDGER.md`, or `contract` declares a new ledger kind | every line |
 | `boundary` | `contract` adds a CLI subcommand or a `plexus.toml` key, or `touches` can reach the heart API pin — or, judged from the diff, it changes, renames or removes a public name that code in a sibling repo calls | the contract diff, the integration point, and every caller the hold lists |
+| `credentials` | judged from the diff: it touches the egress proxy, heart's or plexus's sandbox, plexus's TLS or registry code, anything under `secrets/`, or a changed code line names a token, private key, cert loading or seat secret | every line |
 | `leaf` | one repo; any public names it changes are called only from inside this repo | the report line, unless it says FLAG |
 | `mechanical` | docs and tests only | nothing |
 

@@ -57,7 +57,19 @@ EXEC_NAMES = ("conftest.py", "setup.py", "setup.cfg", "pyproject.toml",
               ".npmrc", ".pre-commit-config.yaml", ".gitlab-ci.yml", ".envrc",
               "Makefile", "*.pth", "sitecustomize.py", "usercustomize.py")
 
-CLASSES = ("spine", "boundary", "exec", "suspect", "leaf", "mechanical")
+# Code that holds a secret or decides whom to trust. On 2026-09-28 eight TLS and
+# seat-injection features landed as leaf after one same-vendor review, and
+# suspicious() said nothing: the modules already used subprocess and the
+# network, so nothing was *new*. Credential work is judged by what it is, not
+# by what it newly adds -- the path, or a credential word on a changed line.
+CREDENTIAL_PATHS = ("egress-proxy.py", "heart/sandbox.py", "plexus/registry.py",
+                    "plexus/tls.py", "plexus/sandbox.py")
+_CREDENTIAL = re.compile(
+    r"seat_secrets|\bsentinel\b|auth\.json|access_token|refresh_token|PRIVATE KEY|"
+    r"private_key|\.key[\"']|ssl\.(SSLContext|create_default_context)|load_cert_chain|"
+    r"load_verify_locations|\b(certfile|keyfile)\b")
+
+CLASSES = ("spine", "boundary", "exec", "credentials", "suspect", "leaf", "mechanical")
 
 
 # Capabilities a backdoor needs and ordinary feature work rarely adds: a way
@@ -161,6 +173,26 @@ def exec_surface(paths: list[str]) -> list[str]:
     return [p for p in paths
             if any(_matches(p, g) for g in EXEC_DIRS)
             or any(fnmatch.fnmatch(p.rsplit("/", 1)[-1], n) for n in EXEC_NAMES)]
+
+
+def credentials(paths: list[str], diff: str) -> list[str]:
+    """What in a diff handles credentials: a path from CREDENTIAL_PATHS or under
+    a `secrets/` directory, or a code line added or removed that names one.
+    Removed lines count too -- dropping a cert check is credential work."""
+    found = [p for p in paths
+             if any(p == c or p.endswith("/" + c) for c in CREDENTIAL_PATHS)
+             or "secrets" in p.split("/")[:-1]]
+    current = None
+    for line in diff.splitlines():
+        if line.startswith(("+++ ", "--- ")):
+            target = line[4:].strip()
+            if target != "/dev/null":
+                current = target[2:] if target[1:2] == "/" and target.endswith(_CODE) else None
+            continue
+        if current and line.startswith(("+", "-")) and _CREDENTIAL.search(line[1:]):
+            found.append(f"{current}: {line[1:].strip()[:80]}")
+            current = None  # one line per file is enough to name it
+    return list(dict.fromkeys(found))
 
 
 def classify(feat: dict) -> str:

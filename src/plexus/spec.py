@@ -56,7 +56,7 @@ timeout = 300
 #                 # large enough to have independent parts.
 
 [review]
-hold = ["spine", "boundary", "exec", "suspect"]
+hold = ["spine", "boundary", "exec", "credentials", "suspect"]
 # boundary = ["src/pkg/sandbox.py", "src/pkg/run.py::_container_env"]
 #   trust boundaries no import graph shows: a diff touching one of these
 #   paths (or the named top-level function in that file) is held as boundary
@@ -65,6 +65,8 @@ hold = ["spine", "boundary", "exec", "suspect"]
 # the diff: hooks, CI, manifests, conftest.py — files that run on your machine.
 # suspect is too: a diff that newly adds network calls, processes, dynamic
 # code, decoding, credential reads, unseen URL hosts or encoded blobs.
+# credentials: the diff touches TLS/seat/secret code, or a changed line
+# names a token, key, cert or seat secret.
 # leaf/mechanical features still land unattended; the classes you list here
 # wait for you.
 pr_base = "main"
@@ -108,7 +110,7 @@ class GoalSpec:
     # something no test covers, or run on your machine once landed: an
     # unattended factory whose riskiest commits land unread is not a factory,
     # it is a liability.
-    review_hold: tuple[str, ...] = ("spine", "boundary", "exec", "suspect")
+    review_hold: tuple[str, ...] = ("spine", "boundary", "exec", "credentials", "suspect")
     # Trust boundaries no import graph shows: `path` globs or `path::function`
     # (e.g. the code that decides what env and mounts reach a sandbox). A diff
     # touching one is held as boundary whatever the plan called the feature.
@@ -170,7 +172,7 @@ def load_spec(root: str | Path = ".") -> GoalSpec:
         timeout=int(agent.get("timeout", 300)),
         network=str(agent.get("network", "web")),
         spec_hash=hashlib.sha256(raw).hexdigest()[:12],
-        review_hold=tuple(review.get("hold", ("spine", "boundary", "exec", "suspect"))),
+        review_hold=tuple(review.get("hold", ("spine", "boundary", "exec", "credentials", "suspect"))),
         review_boundary=tuple(review.get("boundary", ())),
         pr_base=review.get("pr_base", "main"),
         # `[scope].manual_checks` is where these lived before the overview split
