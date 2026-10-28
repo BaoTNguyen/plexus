@@ -174,3 +174,15 @@ def test_land_commits_only_the_diff_not_the_users_edits_in_the_same_file(tmp_pat
     assert (repo / "README.md").read_text() == "A-user-edit\nb\nc\nd\ne\nf\nG\n"
     assert show("diff", "--cached") == ""
     assert "A-user-edit" in show("diff")
+
+
+def test_exhausted_names_what_the_last_attempt_failed_on(monkeypatch, repo):
+    """Acceptance passed every time; the escalation must not say it failed."""
+    roles = [{"role": "review.1", "agent": "claude", "exit_code": 0, "timed_out": False}]
+    ep = _episode(repo, "runs", "ep-x", _add_diff(repo), review_verdict="reject", roles=roles)
+    code, recs = _run_feature(monkeypatch, repo, ep)
+    assert code == 1
+    esc = [r for r in recs if r["kind"] == "escalation.raised"]
+    assert esc[-1]["reason_class"] == "attempts_exhausted"
+    assert "rejected by the review" in esc[-1]["reason"]
+    assert "failed acceptance" not in esc[-1]["reason"]
