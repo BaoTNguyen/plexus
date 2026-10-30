@@ -13,6 +13,7 @@ import subprocess
 from pathlib import Path
 
 from heart.env import Workspace
+from heart.events import artifact
 from heart.routing import resolve
 from heart.runner import SANDBOX_MODE, run_agent, run_contained, turn_profile
 from heart.sandbox import CONTEXT, HOME, JOURNAL, WORK
@@ -22,6 +23,7 @@ from . import ledger
 from . import overview as _overview
 from . import tasks as _tasks
 from . import vascular_state
+from .spec import spec_path
 
 PLAN_PROMPT = """\
 You are planning a software goal that will be built one feature at a time by a
@@ -127,6 +129,11 @@ def plan_path(root: str | Path = ".", task_id: str = "") -> Path:
     and is still what `plexus plan` with no task writes."""
     return (vascular_state.plans_dir(root) / f"{task_id}.jsonl" if task_id
             else vascular_state.plan_jsonl_path(root))
+
+
+def _blob(obj) -> str | None:
+    """A JSON value into pulse's artifact store; the digest, or None."""
+    return artifact(json.dumps(obj, sort_keys=True).encode())
 
 
 def _parse_features(raw: str) -> list[dict]:
@@ -321,6 +328,11 @@ def make_plan(spec, root: str | Path = ".", task_id: str = "") -> list[dict]:
         features=[{"feature_id": f["id"], "title": f["title"],
                    "acceptance": f["acceptance"]} for f in feats],
         rejected=[],  # populated once the planner runs best-of-N
+        # the text behind the ids, for learning to plan: what the planner was
+        # asked, what it answered, what it planned, and the goal it planned for
+        plan_artifact=_blob(feats), prompt_artifact=artifact(prompt.encode()),
+        output_artifact=artifact(log),
+        spec_artifact=artifact(spec_path(root)) if spec_path(root).is_file() else None,
     )
     return feats
 
@@ -361,7 +373,8 @@ def auto_plan(spec, root: str | Path = ".", task_id: str = "") -> list[dict]:
     ledger.record("plan.created", goal_id=spec.goal_id, root=root, plan_id=plan_id,
                   task=task_id, spec_hash=spec.spec_hash, auto=True,
                   features=[{"feature_id": feat["id"], "title": feat["title"],
-                             "acceptance": feat["acceptance"]}], rejected=[])
+                             "acceptance": feat["acceptance"]}], rejected=[],
+                  plan_artifact=_blob([feat]))
     ledger.record("plan.approved", goal_id=spec.goal_id, root=root, plan_id=plan_id,
                   task=task_id, approver="auto:unplanned-task", waived=[])
     return [feat]
@@ -492,13 +505,17 @@ def amend(spec, feature_id: str, root: str | Path = ".",
         raise SystemExit(
             "nothing to amend — pass --acceptance / --spec / --title / --touches"
             " / --needs-upstream")
+    # Kept whole on both sides: where the planner was wrong is the signal for
+    # learning to plan, and the rewrite below loses the planner's version.
+    before = _blob(feat)
     feat.update(changes)
 
     with open(plan_path(root, task_id), "w", encoding="utf-8") as f:
         for p in plan:
             f.write(json.dumps(p) + "\n")
     ledger.record("plan.amended", goal_id=spec.goal_id, feature_id=feature_id,
-                  root=root, task=task_id, changed=sorted(changes), operator=True)
+                  root=root, task=task_id, changed=sorted(changes), operator=True,
+                  before_artifact=before, after_artifact=_blob(feat))
     return f"amended {feature_id}: {', '.join(sorted(changes))} — re-run `plexus run`"
 
 
