@@ -1,5 +1,5 @@
 """API-pin test: plexus imports heart as a library from a sibling source
-checkout (see heart's STACK_READINESS.md 1.2), so a heart refactor can break
+checkout (see vascular docs/adr/2026-07-20-contract-tests.md), so a heart refactor can break
 plexus silently — there is no packaging boundary to catch it. This test fails
 loudly, in plexus's own suite, the moment any heart symbol plexus depends on
 is renamed, removed, or reordered.
