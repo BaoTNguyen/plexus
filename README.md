@@ -165,6 +165,7 @@ before the code into a check.
 
 ## Learn more
 
+- [`docs/operating.md`](docs/operating.md): seats, the fleet, goals that need another repo, the project menu, observability
 - [`docs/adr/`](docs/adr/): why plexus is built the way it is
 - [`LEDGER.md`](LEDGER.md): the ledger's record kinds and the laws that keep it the system of record
 - [`AGENTS.md`](AGENTS.md): conventions for agents working in this repo
