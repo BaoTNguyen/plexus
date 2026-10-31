@@ -6,10 +6,8 @@ feature only when its own check and your whole suite pass, and stops to ask you
 when it can't tell what you want. It can run for hours unattended and picks up
 where it left off after a crash.
 
-plexus is one repo of a six-repo agent stack and runs its agents through
-[heart](https://github.com/BaoTNguyen/heart). The
-[vascular README](https://github.com/BaoTNguyen/vascular#readme) shows how the
-pieces fit.
+plexus is part of [vascular](https://github.com/BaoTNguyen/vascular), the
+monorepo that holds the whole stack in one clone.
 
 ## Why use it
 
@@ -24,7 +22,7 @@ code rather than the model's opinion.
   (`|| true`) is refused at that gate.
 - **Risky work waits for you; routine work doesn't.** Each feature is classed by
   the paths it may touch and the diff it produced. Tests, docs and self-contained
-  changes land on their own. Changes to the ledger, a seam another repo calls,
+  changes land on their own. Changes to the ledger, a name code outside this repo calls,
   credentials, or anything that runs on your machine (hooks, CI, manifests) hold
   for your signature, and the diff you approve is the one that lands.
 - **A crash costs nothing.** State lives in an fsynced ledger under
@@ -39,17 +37,17 @@ code rather than the model's opinion.
 
 ### Install
 
-plexus needs heart checked out beside it, and neither is on PyPI. The easiest
-route is the whole stack: `git clone --recursive https://github.com/BaoTNguyen/vascular`.
-On its own:
+plexus installs from vascular. It is not on PyPI, and a package named `plexus`
+there belongs to someone else.
 
 ```bash
-git clone https://github.com/BaoTNguyen/heart
-git clone https://github.com/BaoTNguyen/plexus && cd plexus
+git clone --recursive https://github.com/BaoTNguyen/vascular
+cd vascular/plexus
 uv sync && uv run pytest -q
-uv tool install --editable . --with-editable ../heart   # `plexus` on your PATH
-plexus doctor          # what this machine still needs; --fix provisions it
+uv run plexus doctor   # what this machine still needs; --fix provisions it
 ```
+
+Putting `plexus` on your PATH is covered in vascular's README.
 
 ### Choose where agents run
 
@@ -57,7 +55,7 @@ plexus doctor          # what this machine still needs; --fix provisions it
 until you say where:
 
 ```bash
-export HEART_SANDBOX=docker-sbx HEART_SANDBOX_IMAGE=heart-agent:latest   # containers
+export HEART_SANDBOX=docker-sbx HEART_SANDBOX_IMAGE=<image>             # containers
 export HEART_SANDBOX=off                                                 # this machine, with a warning
 ```
 
@@ -109,7 +107,7 @@ puts the same controls in a browser at http://127.0.0.1:8100.
    public names it adds or changes).
 2. **Approve.** You read it and sign it off. Claims no suite can check go in
    `[ground_truth] manual`, and you confirm those yourself.
-3. **Run.** For each feature, heart builds it in an isolated worktree, then
+3. **Run.** For each feature, an agent builds it in an isolated worktree, then
    plexus runs the acceptance check against the result.
    - Pass, suite green, inside `touches` → it lands and the loop moves on.
    - Fail → it retries with the failure added to the prompt, up to
@@ -128,7 +126,7 @@ fails before it lands.
 | class | when | read |
 | --- | --- | --- |
 | `spine` | it can touch the ledger, the spec or the event code | every line |
-| `boundary` | it changes a CLI command, a config key, or a name a sibling repo calls | the seam and every caller |
+| `boundary` | it changes a CLI command, a config key, or a name code outside this repo calls | the change and every outside caller |
 | `exec` | it touches files that run on your machine: hooks, CI, manifests, `conftest.py` | every line |
 | `credentials` | it touches TLS, seat or secret code, or names a token or key | every line |
 | `suspect` | the diff newly adds network calls, processes, dynamic code, decoding or encoded blobs | every line |
@@ -156,7 +154,7 @@ before the code into a check.
 | `serve` · `fleet run` | browser control plane; headless runner for a timer |
 | `add` · `remove` · `report` | the project menu and its fleet digest |
 | `stack` · `tail` | factory-wide event rollup; live event tail |
-| `export` · `prune` | training labels for marrow; drop unreferenced episode dumps |
+| `export` · `prune` | training labels (acceptance joined to episode outcome); drop unreferenced episode dumps |
 | `doctor` | sandbox readiness; `--fix` provisions it |
 
 `plexus <command> --help` has the flags.
