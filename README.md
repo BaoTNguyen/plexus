@@ -1,4 +1,7 @@
-# plexus
+# About
+
+plexus is part of [vascular](https://github.com/BaoTNguyen/vascular), the software factory
+monorepo. This repo acts as the platform to plan features and break them down into agent runs.
 
 Give plexus a goal and the test suite that defines "done". It plans the goal
 into small features, has a coding agent build each one in a sandbox, lands a
@@ -6,13 +9,10 @@ feature only when its own check and your whole suite pass, and stops to ask you
 when it can't tell what you want. It can run for hours unattended and picks up
 where it left off after a crash.
 
-plexus is part of [vascular](https://github.com/BaoTNguyen/vascular), the
-monorepo that holds the whole stack in one clone.
-
 ## Why use it
 
-Most autonomous coding loops run until the model says it's finished. plexus
-decides what finished means before the run starts, and checks it with your
+Most autonomous coding loops run until the model says it's finished. Collaborate with plexus to
+decide what finished means before the run starts, and it checks with your
 code rather than the model's opinion.
 
 - **You define done, up front.** Every feature carries an acceptance check, and
