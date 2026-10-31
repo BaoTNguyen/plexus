@@ -4,7 +4,7 @@ intent / logs / traces / bugs, and roll failures up by phase.
 This is the read side that makes semi-autonomous runs reviewable — it turns a
 failed feature into an evidence bundle a human can apply taste to, and it
 never holds the only copy of anything: every attempt points back to a
-`pulse episode <id>` for the raw logs/traces/diff (LEDGER's reference-don't-copy
+`heart observe episode <id>` for the raw logs/traces/diff (LEDGER's reference-don't-copy
 law), so manual verification is always one command deeper.
 
 Phase attribution maps heart/plexus failure classes onto the 40/20/40 phases:
@@ -175,7 +175,7 @@ def why(root: str = ".", feature_id: str | None = None) -> list[str]:
             phases[phase] += 1
             ep = r.get("episode_id", "?")
             out.append(f"  attempt {r.get('attempt', '?')}: {r.get('failure_class')} "
-                       f"[{phase}]  logs/traces/diff: pulse episode {ep}")
+                       f"[{phase}]  logs/traces/diff: heart observe episode {ep}")
 
         landed = next((r for r in frecs if r["kind"] == "feature.landed"), None)
         if landed:

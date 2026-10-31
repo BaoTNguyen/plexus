@@ -101,7 +101,7 @@ ledger.record("escalation.raised", goal_id="g1", feature_id="f2", root=root,
               episode_ids=["ep-3"])
 lines, code = observe.status(root)
 assert code == 1 and any("BLOCKED" in l for l in lines), (lines, code)
-assert any("pulse episode ep-3" in l for l in lines), lines
+assert any("heart observe episode ep-3" in l for l in lines), lines
 
 # --- resolved + finished -> 0 ---
 ledger.record("escalation.resolved", goal_id="g1", feature_id="f2", root=root)
@@ -150,7 +150,7 @@ blob = "\n".join(w)
 assert "feature fx: widget" in blob, blob
 assert "intent (acceptance criterion): make test" in blob, blob
 assert "[coding]" in blob and "[testing]" in blob, blob          # both phases attributed
-assert "pulse episode e2" in blob, blob                          # drill-down to raw traces
+assert "heart observe episode e2" in blob, blob                          # drill-down to raw traces
 assert "escalation [attempts_exhausted]" in blob, blob
 # phase rollup surfaces in insights
 assert any("failures by phase" in l for l in _obs.insights(droot)), _obs.insights(droot)
