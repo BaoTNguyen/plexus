@@ -20,6 +20,7 @@ heart        orchestration + environment + verify
 arteries     memory + trace substrate
 capillaries  prompt/skill retrieval
 marrow       RL training on heart's episodes
+pulse        event journal: collection, store, queries
 ```
 
 ## What sets it apart
@@ -164,7 +165,7 @@ ExecStart=%h/.local/bin/plexus fleet run --root %h/projects \
 | Worktrees, verify-fix loop, review, scoring | **heart** | imported as a library, like marrow does |
 | Prompt/skill selection | **capillaries** | rides along via arteries hooks |
 | Memory, traces, run telemetry | **arteries** | rides along via CLI hooks |
-| Event spine + pulse tooling | **heart** | plexus emits to it, never reinvents it |
+| Event journal, collection, queries | **pulse** | plexus emits through `heart.events`, never reinvents it |
 | Training data | **marrow** | consumes heart's `episodes.jsonl`; plexus does nothing |
 
 Anything not in this table that later looks necessary should first be checked
@@ -488,9 +489,8 @@ zombie, which heart's episode-level zombie rule cannot see). **Cause
 drill-down is delegated**: `plexus status` prints the failing feature's
 episode_ids so the next command is `pulse episode <id>`, not a plexus-specific
 viewer. Goal-level insights (lead times, escalation rate, rescue rate after
-retry) come from the **ledger**, not the journal: pulse's read side rescans the
-entire journal history per query, which is fine at heart's one-day horizon and
-wrong at plexus's multi-week one. Ledger for history, journal for the live
+retry) come from the **ledger**, not the journal: the ledger is the system of
+record for a multi-week goal, and the journal's retention is not. Ledger for history, journal for the live
 window — `plexus insights` stays a small read-side function either way.
 
 ### What went wrong: the judgment surface
@@ -640,8 +640,8 @@ attempt counter, repair-feature synthesis, `notify_cmd`, any UI.
    concurrency caps, and `plexus fleet run` advances them unattended from a
    systemd timer or cron — capped goals, a rolling cost ceiling (subscription
    seats counted at API rates), an optional run-window, auto-stop when drained
-   (done — see the serve section). Still open: a `plexus report` digest, and
-   auto-seeding an upstream goal when `needs_upstream` isn't met.
+   (done — see the serve section), plus the `plexus report` digest and
+   auto-seeding an upstream goal when `needs_upstream` isn't met (both done).
 4. Flywheel export: `plexus export` emits acceptance labels, retry pairs, and
    plan outcomes keyed by task_id for marrow's training stages.
 
