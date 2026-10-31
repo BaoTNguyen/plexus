@@ -1,7 +1,7 @@
 """Retention for `.vascular/plexus/runs/` — the episode dumps heart writes per attempt.
 
 Not a cleanup script, because the dumps are not scratch. Two things hold
-references to them: `plexus why` prints `pulse episode <id>` instead of copying
+references to them: `plexus why` prints `heart observe episode <id>` instead of copying
 evidence (LEDGER law 3), and `plexus export` reads outcomes out of episode.json.
 Deleting freely would silently break the drill-down for old failures and throw
 away training data that was never exported.

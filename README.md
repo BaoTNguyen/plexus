@@ -442,9 +442,9 @@ goal repo's ledger. Like mission-control, plexus only ever *references* a repo �
 
 Heart already implements the SRE-book stack for this ecosystem: an append-only
 NDJSON event spine (`heart/SPINE.md` is the wire canon — additive-only kinds,
-tolerant readers, emission never raises) read by `pulse health` (symptom
-check, exit code as the alert primitive), `pulse episode <id>` (cause
-drill-down), and `pulse insights` (golden-signal dashboard, percentiles never
+tolerant readers, emission never raises) read by `heart observe health` (symptom
+check, exit code as the alert primitive), `heart observe episode <id>` (cause
+drill-down), and `heart observe insights` (golden-signal dashboard, percentiles never
 averages). Plexus builds none of that again. It joins the spine:
 
 - **Emit via `heart.events.emit(source="plexus", ...)`** — plexus already
@@ -487,7 +487,7 @@ check** — exit 0 (progressing or done), 1 (escalations waiting), 2 (stalled:
 ledger says running but no episode events for N minutes — the goal-level
 zombie, which heart's episode-level zombie rule cannot see). **Cause
 drill-down is delegated**: `plexus status` prints the failing feature's
-episode_ids so the next command is `pulse episode <id>`, not a plexus-specific
+episode_ids so the next command is `heart observe episode <id>`, not a plexus-specific
 viewer. Goal-level insights (lead times, escalation rate, rescue rate after
 retry) come from the **ledger**, not the journal: the ledger is the system of
 record for a multi-week goal, and the journal's retention is not. Ledger for history, journal for the live
@@ -501,7 +501,7 @@ your attention lands where taste is actually needed. It reads the ledger and
 prints, per failed or escalated feature: the **intent** it was judged against
 (the acceptance criterion), each attempt's failure attributed to a phase, the
 escalation, a phase verdict, and — because it stores pointers, never copies —
-a `pulse episode <id>` drill-down to the raw **logs, traces, and diff** for
+a `heart observe episode <id>` drill-down to the raw **logs, traces, and diff** for
 every attempt. Manual verification is always one command deeper.
 
 Failures attribute to the 40/20/40 phases (`src/plexus/diagnose.py`):
