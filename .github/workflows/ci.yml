@@ -16,7 +16,7 @@ jobs:
       - run: python3 plexus/docs/adr/index.py --check
 
       # plexus imports heart as a library from a sibling source checkout — there
-      # is no packaging boundary between them (heart's STACK_READINESS.md 1.2),
+      # is no packaging boundary between them (vascular docs/adr/2026-07-20-contract-tests.md),
       # so CI has to reproduce that layout or tests/test_heart_api_pin.py cannot
       # run at all. Which heart is the point of the matrix below: a PR into main
       # is judged against heart's main, while work on dev is judged against
