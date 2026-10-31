@@ -1,5 +1,5 @@
 """Goal-level read side, per pulse's division of labor: `plexus status` is
-the symptom check (exit code as the alert primitive), `pulse episode <id>` is
+the symptom check (exit code as the alert primitive), `heart observe episode <id>` is
 the cause drill-down. Insights come from the ledger, not the journal — pulse's
 full-journal rescan is fine at heart's one-day horizon and wrong at plexus's
 multi-week one. `stack` is the factory-wide rollup no single organ has.
@@ -166,7 +166,7 @@ def status(root: str = ".", stale_minutes: float = 30) -> tuple[list[str], int]:
             line = (f"BLOCKED  {goal_id}: {sum(e['count'] for e in blocked)} escalation(s) "
                     f"open, latest {last['feature_id']} — {last['reason'] or 'no reason recorded'}")
             if last["episode_ids"]:
-                line += f"  drill down: pulse episode {last['episode_ids'][-1]}"
+                line += f"  drill down: heart observe episode {last['episode_ids'][-1]}"
             lines.append(line)
             code = max(code, 1)
             continue
