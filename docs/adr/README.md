@@ -13,6 +13,7 @@ table is stale.
 |---|---|
 | [plan, approve and run refuse unless HEART_SANDBOX is docker-sbx or off](2026-10-13-refuse-unsandboxed-runs.md) | 2026-10-13 |
 | [Learned scope comes from refusals, widens to a directory, and never from probes](2026-08-25-learned-scope-rules.md) | 2026-08-25 |
+| [plexus keeps warren's goal spine and drops its sandbox and HTTP control plane](2026-07-21-what-plexus-takes-from-warren.md) | 2026-07-21 |
 <!-- adr-index:end -->
 
 ## Stack decisions that bind plexus
